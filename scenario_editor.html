@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<!--
+  Halo Wars DE — Scenario Editor
+  Version: v0.1.1
+  Author:  Tom van Ryswyk (BoldBoimler) https://github.com/BoldBoimler
+  License: MIT — Copyright (c) 2025 Tom van Ryswyk
+  Repo:    https://github.com/BoldBoimler/halo-wars-scenario-editor
+
+  Built with React 18 (CDN) + Babel Standalone. No build step required.
+  Open directly in any modern browser.
+-->
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Halo Wars DE — Scenario Editor</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0c10; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0a0c10; }
+    ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 3px; }
+    .cat-item { transition: background 0.08s; }
+    .cat-item:hover { background: #0d2035 !important; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect, useCallback } = React;
+
+    const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPod|iPad/.test(navigator.platform);
+    const MOD   = isMac ? "⌘" : "Ctrl+";
+
+    // ── Object type registry ──────────────────────────────────────────────────────
+    const OBJECT_TYPES = {
+      basesocket:       { color: "#4A9EFF", label: "Base Socket",       layer: "gameplay" },
+      supplyhook:       { color: "#44FF88", label: "Supply Hook",       layer: "gameplay" },
+      sniperplatform:   { color: "#FFD700", label: "Sniper Platform",   layer: "gameplay" },
+      bonusreactor:     { color: "#FF44AA", label: "Bonus Reactor",     layer: "gameplay" },
+      bonushouse:       { color: "#FF44AA", label: "Bonus House",       layer: "gameplay" },
+      bridge:           { color: "#FF8C00", label: "Bridge",            layer: "gameplay" },
+      turretsocket:     { color: "#FFA500", label: "Turret Socket",     layer: "gameplay" },
+      cover:            { color: "#A0C8FF", label: "Cover",             layer: "gameplay" },
+      teleporter:       { color: "#00FFD0", label: "Teleporter",        layer: "gameplay" },
+      wall:             { color: "#8888AA", label: "Wall",              layer: "gameplay" },
+      megaturret:       { color: "#FF6600", label: "Mega Turret",       layer: "gameplay" },
+      supplyspawner:    { color: "#44FF88", label: "Supply Spawner",    layer: "gameplay" },
+      healingzone:      { color: "#88FF44", label: "Healing Zone",      layer: "gameplay" },
+      sentinelstore:    { color: "#C0A0FF", label: "Sentinel Store",    layer: "gameplay" },
+      playerstart:      { color: "#FF4444", label: "Player Start",      layer: "gameplay" },
+      supplycrate:      { color: "#FFCC44", label: "Supply Crate",      layer: "supply"   },
+      rebelmarker:      { color: "#FF4444", label: "Rebel Marker",      layer: "creep"    },
+      floodmarker:      { color: "#AA44FF", label: "Flood Marker",      layer: "creep"    },
+      forerunnermarker: { color: "#44DDFF", label: "Forerunner Marker", layer: "creep"    },
+      creepbase:        { color: "#CC44FF", label: "Creep Base",        layer: "creep"    },
+      creepconfig:      { color: "#886699", label: "Creep Config",      layer: "creep"    },
+      creepworld:       { color: "#664477", label: "Creep World",       layer: "creep"    },
+      unit:             { color: "#00FFFF", label: "Unit",              layer: "units"    },
+      designsphere:     { color: "#FFFFFF", label: "Creep Zone",        layer: "gameplay" },
+      default:          { color: "#888888", label: "Other",             layer: "art"      },
+    };
+
+    const DOT_RADIUS = {
+      basesocket: 10, playerstart: 12, supplyhook: 8, sniperplatform: 8,
+      bonusreactor: 7, bonushouse: 7, bridge: 9, turretsocket: 7,
+      cover: 8, teleporter: 8, wall: 7, megaturret: 9, supplyspawner: 7,
+      healingzone: 8, sentinelstore: 7, supplycrate: 5,
+      rebelmarker: 7, floodmarker: 7, forerunnermarker: 7,
+      creepbase: 9, creepconfig: 6, creepworld: 6,
+      unit: 7, default: 5, designsphere: 8,
+    };
+
+    const LAYERS = [
+      { id: "gameplay", label: "Gameplay",  color: "#4A9EFF" },
+      { id: "creep",    label: "Creep/AI",  color: "#CC44FF" },
+      { id: "supply",   label: "Supply",    color: "#FFCC44" },
+      { id: "units",    label: "Units",     color: "#FF6B35" },
+      { id: "art",      label: "Art/Decor", color: "#888888" },
+    ];
+
+    // ── Full object catalogue ─────────────────────────────────────────────────────
+    const CATALOGUE = [
+      { section: "GAMEPLAY", items: [
+        { label: "Base Socket",      kind: "basesocket",    typeStr: "game_base_Socket_01"          },
+        { label: "Supply Hook",      kind: "supplyhook",    typeStr: "hook_bldg_miniBase_01"         },
+        { label: "Sniper Platform",  kind: "sniperplatform",typeStr: "hook_bldg_sniperplatform_01"   },
+        { label: "Turret Socket",    kind: "turretsocket",  typeStr: "hook_bldg_turretSocket_01"     },
+        { label: "Bonus Reactor",    kind: "bonusreactor",  typeStr: "hook_bonus_reactor_01"         },
+        { label: "Bonus House",      kind: "bonushouse",    typeStr: "hook_bonus_house_01"           },
+        { label: "Healing Zone",     kind: "healingzone",   typeStr: "hook_buff_healing_01"          },
+        { label: "Mega Turret",      kind: "megaturret",    typeStr: "hook_bldg_megaTurret_01"       },
+        { label: "Wall (type 1)",    kind: "wall",          typeStr: "hook_bldg_wall_01"             },
+        { label: "Wall (type 2)",    kind: "wall",          typeStr: "hook_bldg_wall_02"             },
+        { label: "Teleporter 1-way", kind: "teleporter",    typeStr: "hook_bldg_teleporter1way_01"   },
+        { label: "Teleporter 2-way", kind: "teleporter",    typeStr: "hook_bldg_teleporter2way_01"   },
+        { label: "Supply Spawner",   kind: "supplyspawner", typeStr: "hook_spawner_supply3hole_01"   },
+        { label: "Sentinel Store 1", kind: "sentinelstore", typeStr: "hook_store_sentinel_01"        },
+        { label: "Sentinel Store 2", kind: "sentinelstore", typeStr: "hook_store_sentinel_02"        },
+        { label: "Bridge",           kind: "bridge",        typeStr: ""                              },
+      ]},
+      { section: "COVER", items: [
+        { label: "Warthog Cover 1",  kind: "cover", typeStr: "hook_bldg_WarthogCover_01"       },
+        { label: "Warthog Cover 2",  kind: "cover", typeStr: "hook_bldg_WarthogCover_02"       },
+        { label: "Warthog Cover 3",  kind: "cover", typeStr: "hook_bldg_WarthogCover_03"       },
+        { label: "Pelican Cover Sm", kind: "cover", typeStr: "hook_bldg_pelicanCover_01"       },
+        { label: "Pelican Cover 1",  kind: "cover", typeStr: "hook_bldg_PelicanMediumCover_01" },
+        { label: "Pelican Cover 2",  kind: "cover", typeStr: "hook_bldg_PelicanMediumCover_02" },
+        { label: "Pelican Cover 3",  kind: "cover", typeStr: "hook_bldg_PelicanMediumCover_03" },
+        { label: "Civilian Bus",     kind: "cover", typeStr: "hook_bldg_civbuscover_01"        },
+      ]},
+      { section: "REBEL CREEPS", items: [
+        { label: "Infantry Marker",  kind: "rebelmarker", typeStr: "sys_rebelMarker_infantry_01"     },
+        { label: "Sniper Marker",    kind: "rebelmarker", typeStr: "sys_rebelMarker_sniper_01"       },
+        { label: "Turret Flak",      kind: "rebelmarker", typeStr: "sys_rebelMarker_turretFlak_01"   },
+        { label: "Turret Railgun",   kind: "rebelmarker", typeStr: "sys_rebelMarker_turretRailgun_01"},
+        { label: "Rebel Base 1",     kind: "creepbase",   typeStr: "creep_rebel_base_01"             },
+        { label: "Rebel Base 2",     kind: "creepbase",   typeStr: "creep_rebel_base_02"             },
+        { label: "Rebel Base 3",     kind: "creepbase",   typeStr: "creep_rebel_base_03"             },
+        { label: "Arcadia Base 1",   kind: "creepbase",   typeStr: "creep_rebel_arcadiaBase_01"      },
+        { label: "Arcadia Base 2",   kind: "creepbase",   typeStr: "creep_rebel_arcadiaBase_02"      },
+        { label: "Arcadia Base 3",   kind: "creepbase",   typeStr: "creep_rebel_arcadiaBase_03"      },
+      ]},
+      { section: "FLOOD CREEPS", items: [
+        { label: "Marine",           kind: "floodmarker", typeStr: "sys_floodMarker_marine_01"         },
+        { label: "Flame Marine",     kind: "floodmarker", typeStr: "sys_floodMarker_flameMarine_01"    },
+        { label: "Brute",            kind: "floodmarker", typeStr: "sys_floodMarker_brute_01"          },
+        { label: "Carrier",          kind: "floodmarker", typeStr: "sys_floodMarker_carrier_01"        },
+        { label: "Grunt",            kind: "floodmarker", typeStr: "sys_floodMarker_grunt_01"          },
+        { label: "Jackal",           kind: "floodmarker", typeStr: "sys_floodMarker_jackal_01"         },
+        { label: "Elite",            kind: "floodmarker", typeStr: "sys_floodMarker_elite_01"          },
+        { label: "Rhinodillo",       kind: "floodmarker", typeStr: "sys_floodMarker_rhinodillo_01"     },
+        { label: "Infection Form",   kind: "floodmarker", typeStr: "sys_floodMarker_infectionForm_01"  },
+        { label: "Tentacle",         kind: "floodmarker", typeStr: "sys_floodMarker_tentacle_01"       },
+        { label: "Swarm",            kind: "floodmarker", typeStr: "sys_floodMarker_swarm_01"          },
+        { label: "Spewer",           kind: "floodmarker", typeStr: "sys_floodMarker_spewer_01"         },
+        { label: "Bomber",           kind: "floodmarker", typeStr: "sys_floodMarker_bomber_01"         },
+        { label: "Howitzer",         kind: "floodmarker", typeStr: "sys_floodMarker_howitzer_01"       },
+        { label: "Spore Cloud",      kind: "floodmarker", typeStr: "sys_floodMarker_SporeCloud_01"     },
+        { label: "Flood Base",       kind: "creepbase",   typeStr: "creep_flood_base_01"               },
+        { label: "Flood Release 1",  kind: "floodmarker", typeStr: "hook_spawner_FloodRelease_01"      },
+        { label: "Flood Release 2",  kind: "floodmarker", typeStr: "hook_spawner_FloodRelease_02"      },
+      ]},
+      { section: "FORERUNNER CREEPS", items: [
+        { label: "Sentinel",         kind: "forerunnermarker", typeStr: "sys_foreRunnerMarker_sentinel_01"      },
+        { label: "Super Sentinel",   kind: "forerunnermarker", typeStr: "sys_foreRunnerMarker_superSentinel_01" },
+        { label: "Forerunner Base 1",kind: "creepbase",        typeStr: "creep_forerunner_base_01"              },
+        { label: "Forerunner Base 2",kind: "creepbase",        typeStr: "creep_forerunner_base_02"              },
+        { label: "Forerunner Base 3",kind: "creepbase",        typeStr: "creep_forerunner_base_03"              },
+      ]},
+      { section: "CREEP CONFIG", items: [
+        { label: "Difficulty: Easy",   kind: "creepconfig", typeStr: "sys_creepDifficulty_easy_01"   },
+        { label: "Difficulty: Medium", kind: "creepconfig", typeStr: "sys_creepDifficulty_medium_01" },
+        { label: "Difficulty: Hard",   kind: "creepconfig", typeStr: "sys_creepDifficulty_hard_01"   },
+        { label: "Reward: Small",      kind: "creepconfig", typeStr: "sys_creepReward_small_01"      },
+        { label: "Reward: Medium",     kind: "creepconfig", typeStr: "sys_creepReward_medium_01"     },
+        { label: "Reward: Large",      kind: "creepconfig", typeStr: "sys_creepReward_large_01"      },
+        { label: "World: Harvest",     kind: "creepworld",  typeStr: "sys_creepWorld_Harvest_01"     },
+        { label: "World: Arcadia",     kind: "creepworld",  typeStr: "sys_creepWorld_Arcadia_01"     },
+        { label: "World: Shield World",kind: "creepworld",  typeStr: "sys_creepWorld_ShieldWorld_01" },
+        { label: "World: Flood",       kind: "creepworld",  typeStr: "sys_creepWorld_flood_01"       },
+      ]},
+      { section: "PREFABS — REBEL", items: [
+        { label: "Rebel Camp (Easy)",   kind: "rebelmarker", isPrefab: true, prefabItems: [
+          { typeStr: "sys_creepDifficulty_easy_01",  kind: "creepconfig", dx:   0,  dz:   0 },
+          { typeStr: "sys_creepReward_small_01",     kind: "creepconfig", dx:  80,  dz:   0 },
+          { typeStr: "sys_rebelMarker_infantry_01",  kind: "rebelmarker", dx:  40,  dz: -30 },
+          { typeStr: "sys_rebelMarker_infantry_01",  kind: "rebelmarker", dx: -40,  dz:  50 },
+        ]},
+        { label: "Rebel Camp (Medium)", kind: "rebelmarker", isPrefab: true, prefabItems: [
+          { typeStr: "sys_creepDifficulty_medium_01",kind: "creepconfig", dx:   0,  dz:   0 },
+          { typeStr: "sys_creepReward_medium_01",    kind: "creepconfig", dx:  80,  dz:   0 },
+          { typeStr: "sys_rebelMarker_infantry_01",  kind: "rebelmarker", dx:  40,  dz: -30 },
+          { typeStr: "sys_rebelMarker_infantry_01",  kind: "rebelmarker", dx: -40,  dz:  50 },
+          { typeStr: "sys_rebelMarker_sniper_01",    kind: "rebelmarker", dx:  60,  dz:  60 },
+        ]},
+        { label: "Rebel Camp (Hard)",   kind: "rebelmarker", isPrefab: true, prefabItems: [
+          { typeStr: "sys_creepDifficulty_hard_01",  kind: "creepconfig", dx:   0,  dz:   0 },
+          { typeStr: "sys_creepReward_large_01",     kind: "creepconfig", dx:  80,  dz:   0 },
+          { typeStr: "sys_rebelMarker_infantry_01",  kind: "rebelmarker", dx:  40,  dz: -30 },
+          { typeStr: "sys_rebelMarker_infantry_01",  kind: "rebelmarker", dx: -40,  dz:  50 },
+          { typeStr: "sys_rebelMarker_sniper_01",    kind: "rebelmarker", dx:  60,  dz:  60 },
+          { typeStr: "sys_rebelMarker_turretFlak_01",kind: "rebelmarker", dx: -60,  dz: -60 },
+        ]},
+      ]},
+      { section: "PREFABS — FORERUNNER", items: [
+        { label: "Forerunner Outpost (Easy)",  kind: "forerunnermarker", isPrefab: true, prefabItems: [
+          { typeStr: "sys_creepDifficulty_easy_01",           kind: "creepconfig",      dx:   0,  dz:   0 },
+          { typeStr: "sys_creepReward_small_01",              kind: "creepconfig",      dx:  80,  dz:   0 },
+          { typeStr: "sys_foreRunnerMarker_sentinel_01",      kind: "forerunnermarker", dx:  40,  dz: -30 },
+          { typeStr: "sys_foreRunnerMarker_sentinel_01",      kind: "forerunnermarker", dx: -40,  dz:  50 },
+        ]},
+        { label: "Forerunner Outpost (Hard)",  kind: "forerunnermarker", isPrefab: true, prefabItems: [
+          { typeStr: "sys_creepDifficulty_hard_01",           kind: "creepconfig",      dx:   0,  dz:   0 },
+          { typeStr: "sys_creepReward_large_01",              kind: "creepconfig",      dx:  80,  dz:   0 },
+          { typeStr: "sys_foreRunnerMarker_sentinel_01",      kind: "forerunnermarker", dx:  40,  dz: -30 },
+          { typeStr: "sys_foreRunnerMarker_sentinel_01",      kind: "forerunnermarker", dx: -40,  dz:  50 },
+          { typeStr: "sys_foreRunnerMarker_superSentinel_01", kind: "forerunnermarker", dx:  60,  dz:  60 },
+          { typeStr: "sys_foreRunnerMarker_superSentinel_01", kind: "forerunnermarker", dx: -60,  dz: -60 },
+        ]},
+      ]},
+      { section: "SUPPLY", items: [
+        { label: "Crate ×3 (A)", kind: "supplycrate", typeStr: "sys_marker_crate3A_01" },
+        { label: "Crate ×3 (B)", kind: "supplycrate", typeStr: "sys_marker_crate3B_01" },
+        { label: "Crate ×3 (C)", kind: "supplycrate", typeStr: "sys_marker_crate3C_01" },
+        { label: "Crate ×5",     kind: "supplycrate", typeStr: "sys_marker_crate5_01"  },
+        { label: "Crate ×12",    kind: "supplycrate", typeStr: "sys_marker_crate12_01" },
+      ]},
+      { section: "DESIGN SPHERES", items: [
+        { label: "Creep Zone (r=65)",  kind: "designsphere", isSphere: true, radius: 65  },
+        { label: "Creep Zone (r=100)", kind: "designsphere", isSphere: true, radius: 100 },
+        { label: "Creep Zone (r=150)", kind: "designsphere", isSphere: true, radius: 150 },
+      ]},
+    ];
+
+    // ── Classifier ────────────────────────────────────────────────────────────────
+    function classifyObject(editorName, typeStr) {
+      const t = (typeStr  || "").toLowerCase();
+      const e = (editorName || "").toLowerCase();
+      const n = t || e;  // prefer type string, fall back to editor name
+
+      if (n.includes("game_base_socket") || n.includes("basesocket") || n.includes("base_socket")) return "basesocket";
+      if (n.includes("hook_bldg_minibase") || n.includes("minibase") || n.includes("supplyhook") || n.includes("supply_hook")) return "supplyhook";
+      if (n.includes("sniperplatform") || n.includes("sniper_platform") || n.includes("hook_bldg_sniper")) return "sniperplatform";
+      if (n.includes("hook_bldg_turretsocket") || n.includes("turretsocket") || n.includes("turret_socket")) return "turretsocket";
+      if (n.includes("hook_bonus_reactor") || n.includes("bonus_reactor")) return "bonusreactor";
+      if (n.includes("hook_bonus_house") || n.includes("bonus_house")) return "bonushouse";
+      if (n.includes("hook_buff_healing") || n.includes("buff_healing")) return "healingzone";
+      if (n.includes("hook_bldg_megaturret") || n.includes("megaturret")) return "megaturret";
+      if (n.includes("hook_bldg_wall")) return "wall";
+      if (n.includes("hook_bldg_teleporter") || n.includes("teleporter")) return "teleporter";
+      if (n.includes("hook_spawner_supply") || n.includes("supply3hole")) return "supplyspawner";
+      if (n.includes("hook_store_sentinel")) return "sentinelstore";
+      // Cover: explicit hook_bldg_ prefixes only — no bare "cover" catch-all
+      if (n.includes("hook_bldg_warthogcover") || n.includes("hook_bldg_pelicanmediumcover") ||
+          n.includes("hook_bldg_pelican") || n.includes("hook_bldg_civbus") ||
+          n.includes("hook_bldg_cover")) return "cover";
+      if (n.includes("bridge") || e.includes("bridge")) return "bridge";
+      if (n.includes("sys_marker_crate") || n.includes("rsrc_supplies_crate")) return "supplycrate";
+      if (n.includes("sys_creepreward") || n.includes("sys_creepdifficulty")) return "creepconfig";
+      if (n.includes("sys_creepworld")) return "creepworld";
+      // Forerunner — check before generic creep checks
+      if (n.includes("sys_forerunnermarker") || n.includes("sys_forerunner")) return "forerunnermarker";
+      if (n.includes("creep_forerunner_base")) return "creepbase";
+      // Rebel
+      if (n.includes("sys_rebelmarker") || (n.includes("creep_rebel") && !n.includes("base"))) return "rebelmarker";
+      if (n.includes("creep_rebel_base") || n.includes("creep_rebel_arcadia")) return "creepbase";
+      // Flood
+      if (n.includes("sys_floodmarker") || n.includes("hook_spawner_floodrelease")) return "floodmarker";
+      if (n.includes("creep_flood_base")) return "creepbase";
+      // Player starts
+      if (n.includes("playerstart") || n.includes("player_start")) return "playerstart";
+      // Units
+      if (n.includes("squad") || n.includes("_inf_") || n.includes("_veh_") || n.includes("_air_")) return "unit";
+      return "default";
+    }
+
+    // ── Parsers ───────────────────────────────────────────────────────────────────
+    function parsePos(str) {
+      if (!str) return null;
+      const parts = str.split(",").map(parseFloat);
+      if (parts.length < 3 || parts.some(isNaN)) return null;
+      return { x: parts[0], y: parts[1], z: parts[2] };
+    }
+
+    // Get only direct text content of element, not nested child text
+    function directText(el) {
+      let text = "";
+      el.childNodes.forEach(n => { if (n.nodeType === 3) text += n.nodeValue; });
+      return text.trim();
+    }
+
+    function parseSCN(xmlText) {
+      const parser = new DOMParser();
+      const doc    = parser.parseFromString(xmlText, "text/xml");
+      const pe     = doc.querySelector("parsererror");
+      if (pe) throw new Error("Invalid XML: " + pe.textContent.slice(0, 100));
+
+      const objects = [];
+      const boundsX = 1280, boundsZ = 1280;
+
+      doc.querySelectorAll("Object").forEach((el) => {
+        const pos = parsePos(el.getAttribute("Position")); if (!pos) return;
+        const editorName = el.getAttribute("EditorName") || "";
+        const typeName   = directText(el);   // fix: direct text only, not nested children
+        objects.push({
+          id: objects.length, name: editorName || typeName || "Object",
+          type: typeName, player: el.getAttribute("Player") || "0",
+          x: pos.x, y: pos.y, z: pos.z,
+          kind: classifyObject(editorName, typeName),
+          raw: el.outerHTML.slice(0, 1200), _el: el,
+        });
+      });
+
+      doc.querySelectorAll("Squad").forEach((el) => {
+        const pos = parsePos(el.getAttribute("Position")); if (!pos) return;
+        const editorName = el.getAttribute("EditorName") || el.getAttribute("Name") || "Squad";
+        const typeName   = directText(el);
+        objects.push({
+          id: objects.length, name: editorName,
+          type: typeName || "squad", player: el.getAttribute("Player") || "0",
+          x: pos.x, y: pos.y, z: pos.z,
+          kind: classifyObject(editorName, typeName),
+          raw: el.outerHTML.slice(0, 1200), _el: el,
+        });
+      });
+
+      doc.querySelectorAll("Positions > Position").forEach((el) => {
+        const pos = parsePos(el.getAttribute("Position")); if (!pos) return;
+        const player = el.getAttribute("Player") || "";
+        const number = el.getAttribute("Number") || "";
+        objects.push({
+          id: objects.length, name: `Player Start P${player} #${number}`,
+          type: "playerstart", player,
+          x: pos.x, y: pos.y, z: pos.z, kind: "playerstart",
+          raw: el.outerHTML.slice(0, 500), _el: el,
+        });
+      });
+
+      doc.querySelectorAll("Sphere").forEach((el) => {
+        const pos = parsePos(el.getAttribute("Position")); if (!pos) return;
+        const name   = el.getAttribute("EditorName") || el.getAttribute("Name") || "DesignSphere";
+        const typeEl = el.querySelector("Type");
+        const type   = typeEl ? typeEl.textContent.trim() : "sphere";
+        const radius = parseFloat(el.getAttribute("Radius") || "65");
+        objects.push({
+          id: objects.length, name, type, player: "",
+          x: pos.x, y: pos.y, z: pos.z,
+          radius, kind: "designsphere",
+          raw: el.outerHTML.slice(0, 500), _el: el,
+        });
+      });
+
+      return { objects, boundsX, boundsZ, doc };
+    }
+
+    // ── Y interpolation (nearest-neighbour, inverse-distance weighted) ────────────
+    function interpolateY(newX, newZ, objects, n = 6) {
+      const candidates = objects
+        .filter(o => typeof o.y === "number" && isFinite(o.y) && o.y !== 0)
+        .map(o => ({ y: o.y, dist: Math.sqrt((o.x - newX) ** 2 + (o.z - newZ) ** 2) }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, n);
+      if (!candidates.length) return 0;
+      if (candidates[0].dist < 0.5) return candidates[0].y;
+      const totalW = candidates.reduce((s, c) => s + 1 / c.dist, 0);
+      return candidates.reduce((s, c) => s + c.y / c.dist, 0) / totalW;
+    }
+
+    // ── Styles ────────────────────────────────────────────────────────────────────
+    const ph  = { fontSize: 10, letterSpacing: 3, color: "#4a6a8a", marginBottom: 10, borderBottom: "1px solid #1a2a3a", paddingBottom: 4 };
+    const btn = { background: "transparent", border: "1px solid #1e3a5f", color: "#4A9EFF", padding: "5px 12px", fontSize: 11, cursor: "pointer", letterSpacing: 1 };
+    const tbBtn = (active, danger) => ({
+      background: "transparent",
+      border: `1px solid ${active ? (danger ? "#ff5555" : "#2a4a7a") : "#111a28"}`,
+      color: active ? (danger ? "#ff5555" : "#7ab8ff") : "#2a4060",
+      padding: "4px 10px", fontSize: 10, cursor: active ? "pointer" : "default",
+      letterSpacing: 1, borderRadius: 2, transition: "all 0.1s",
+    });
+    const fieldInput = {
+      background: "#060d18", border: "1px solid #1e3a5f", color: "#c8d8e8",
+      fontFamily: "'Courier New', monospace", fontSize: 11,
+      padding: "2px 6px", outline: "none", width: "100%",
+    };
+
+    // ── Main component ────────────────────────────────────────────────────────────
+    function ScenarioEditor() {
+      const [scnMeta,       setScnMeta]       = useState(null);
+      const [objects,       setObjects]       = useState([]);
+      const [selected,      setSelected]      = useState(null);
+      const [activeLayers,  setActiveLayers]  = useState({ gameplay: true, creep: true, supply: true, units: true, art: false });
+      const [error,         setError]         = useState(null);
+      const [zoom,          setZoom]          = useState(1);
+      const [pan,           setPan]           = useState({ x: 0, y: 0 });
+      const [inspectorH,    setInspectorH]    = useState(240);
+      const [isDirty,       setIsDirty]       = useState(false);
+      const [isDraggingObj, setIsDraggingObj] = useState(false);
+      const [cursorStyle,   setCursorStyle]   = useState("crosshair");
+      const [histVersion,   setHistVersion]   = useState(0);
+      const [iconsTick,     setIconsTick]     = useState(0);
+      const [iconsData,     setIconsData]     = useState({});
+      const [iconsOpen,     setIconsOpen]     = useState(false);
+      const [draft,         setDraft]         = useState(null);
+      const [ghostPos,      setGhostPos]      = useState(null);
+      const [ghostItem,     setGhostItem]     = useState(null);   // {kind, label, typeStr}
+      const [catSearch,     setCatSearch]     = useState("");
+      const [catCollapsed,  setCatCollapsed]  = useState({});     // section → bool // rot: 0/90/180/270
+
+      const canvasRef      = useRef(null);
+      const containerRef   = useRef(null);
+      const panDrag        = useRef(null);
+      const objDrag        = useRef(null);
+      const resizeDrag     = useRef(null);
+      const didMove        = useRef(false);
+      const hoverWas       = useRef(false);
+      const galleryDragRef = useRef(null);
+      const iconsRef       = useRef({});
+      const scnMetaRef     = useRef(null);
+      const objectsRef     = useRef([]);
+      const zoomRef        = useRef(1);
+      const panRef         = useRef({ x: 0, y: 0 });
+      const selectedRef    = useRef(null);
+      const activeLayersRef= useRef({});
+      const historyRef     = useRef([]);
+      const histIdxRef     = useRef(-1);
+      const clipRef        = useRef(null);
+
+      useEffect(() => { scnMetaRef.current      = scnMeta;      }, [scnMeta]);
+      useEffect(() => { objectsRef.current      = objects;      }, [objects]);
+      useEffect(() => { zoomRef.current         = zoom;         }, [zoom]);
+      useEffect(() => { panRef.current          = pan;          }, [pan]);
+      useEffect(() => { selectedRef.current     = selected;     }, [selected]);
+      useEffect(() => { activeLayersRef.current = activeLayers; }, [activeLayers]);
+
+      // ── Draft ──────────────────────────────────────────────────────────────────
+      useEffect(() => {
+        if (selected) setDraft({ name: selected.name, player: selected.player,
+          x: selected.x.toFixed(3), y: selected.y.toFixed(3), z: selected.z.toFixed(3) });
+        else setDraft(null);
+      }, [selected?.id]);
+
+      useEffect(() => {
+        if (isDraggingObj && selected)
+          setDraft(d => d ? { ...d, x: selected.x.toFixed(3), z: selected.z.toFixed(3) } : d);
+      }, [selected?.x, selected?.z, isDraggingObj]);
+
+      const commitDraftField = useCallback((field, rawValue) => {
+        const obj = selectedRef.current; if (!obj) return;
+        let value;
+        if (["x","y","z"].includes(field)) { value = parseFloat(rawValue); if (isNaN(value)) return; }
+        else if (field === "player") { value = String(Math.max(0, Math.min(6, parseInt(rawValue)||0))); }
+        else value = String(rawValue);
+        const prevObj = objectsRef.current.find(o => o.id === obj.id); if (!prevObj) return;
+        const nextObj = { ...prevObj, [field]: value };
+        setObjects(prev => prev.map(o => o.id === obj.id ? nextObj : o));
+        setSelected(nextObj);
+        pushAction({ type: "edit", id: obj.id, prevObj, nextObj });
+        setIsDirty(true);
+      }, []);
+
+      // ── History ────────────────────────────────────────────────────────────────
+      const pushAction = useCallback((action) => {
+        const stack = historyRef.current.slice(0, histIdxRef.current + 1);
+        stack.push(action);
+        if (stack.length > 80) stack.shift();
+        historyRef.current = stack;
+        histIdxRef.current = stack.length - 1;
+        setHistVersion(v => v + 1);
+      }, []);
+
+      const applyUndo = useCallback((action) => {
+        if (action.type === "move") {
+          setObjects(p => p.map(o => o.id === action.id ? {...o, x: action.fromX, z: action.fromZ} : o));
+          setSelected(p => p?.id === action.id ? {...p, x: action.fromX, z: action.fromZ} : p);
+        } else if (action.type === "edit") {
+          setObjects(p => p.map(o => o.id === action.id ? action.prevObj : o));
+          setSelected(p => p?.id === action.id ? action.prevObj : p);
+        } else if (action.type === "delete") {
+          if (action.parent && action.obj._el) {
+            if (action.nextSibling) action.parent.insertBefore(action.obj._el, action.nextSibling);
+            else action.parent.appendChild(action.obj._el);
+          }
+          setObjects(p => [...p, action.obj].sort((a,b) => a.id - b.id));
+          setSelected(action.obj);
+        } else if (action.type === "place") {
+          action.obj._el?.parentNode?.removeChild(action.obj._el);
+          setObjects(p => p.filter(o => o.id !== action.obj.id));
+          setSelected(null);
+        }
+        setIsDirty(true);
+      }, []);
+
+      const applyRedo = useCallback((action) => {
+        if (action.type === "move") {
+          setObjects(p => p.map(o => o.id === action.id ? {...o, x: action.toX, z: action.toZ} : o));
+          setSelected(p => p?.id === action.id ? {...p, x: action.toX, z: action.toZ} : p);
+        } else if (action.type === "edit") {
+          setObjects(p => p.map(o => o.id === action.id ? action.nextObj : o));
+          setSelected(p => p?.id === action.id ? action.nextObj : p);
+        } else if (action.type === "delete") {
+          action.obj._el?.parentNode?.removeChild(action.obj._el);
+          setObjects(p => p.filter(o => o.id !== action.obj.id));
+          setSelected(null);
+        } else if (action.type === "place") {
+          if (action.parent) action.parent.appendChild(action.obj._el);
+          setObjects(p => [...p, action.obj]);
+          setSelected(action.obj);
+        }
+        setIsDirty(true);
+      }, []);
+
+      const undo = useCallback(() => {
+        const idx = histIdxRef.current; if (idx < 0) return;
+        applyUndo(historyRef.current[idx]);
+        histIdxRef.current = idx - 1;
+        setHistVersion(v => v + 1);
+      }, [applyUndo]);
+
+      const redo = useCallback(() => {
+        const idx = histIdxRef.current;
+        if (idx >= historyRef.current.length - 1) return;
+        histIdxRef.current = idx + 1;
+        applyRedo(historyRef.current[idx + 1]);
+        setHistVersion(v => v + 1);
+      }, [applyRedo]);
+
+      const canUndo = histIdxRef.current >= 0;
+      const canRedo = histIdxRef.current < historyRef.current.length - 1;
+
+      // ── Edit actions ──────────────────────────────────────────────────────────
+      const copySelected   = useCallback(() => { if (!selectedRef.current) return; clipRef.current = selectedRef.current; setHistVersion(v=>v+1); }, []);
+
+      const pasteClipboard = useCallback(() => {
+        const src = clipRef.current; if (!src) return;
+        const meta = scnMetaRef.current; if (!meta) return;
+        const objectsEl = meta.doc.querySelector("Objects");
+        const parent = objectsEl ?? src._el?.parentNode; if (!parent) return;
+        const newEl  = src._el.cloneNode(true);
+        const newId  = objectsRef.current.reduce((m,o) => Math.max(m, o.id), 0) + 1;
+        const xmlId  = objectsRef.current.reduce((m,o) => Math.max(m, parseInt(o._el?.getAttribute("ID")||"0")), 0) + 1;
+        const name   = `${src.type||src.kind}_${xmlId}`;
+        newEl.setAttribute("ID", xmlId); newEl.setAttribute("EditorName", name);
+        newEl.setAttribute("Position", `${(src.x+20).toFixed(4)},${src.y.toFixed(4)},${(src.z+20).toFixed(4)}`);
+        parent.appendChild(newEl);
+        const newObj = { ...src, id: newId, name, x: src.x+20, z: src.z+20, _el: newEl, raw: newEl.outerHTML.slice(0,1200) };
+        setObjects(p => [...p, newObj]); setSelected(newObj);
+        pushAction({ type: "place", obj: newObj, parent }); setIsDirty(true);
+      }, [pushAction]);
+
+      const deleteSelected = useCallback(() => {
+        const obj = selectedRef.current; if (!obj) return;
+        const parent = obj._el?.parentNode ?? null, nextSibling = obj._el?.nextSibling ?? null;
+        if (obj._el && parent) parent.removeChild(obj._el);
+        setObjects(p => p.filter(o => o.id !== obj.id)); setSelected(null);
+        pushAction({ type: "delete", obj, parent, nextSibling }); setIsDirty(true);
+      }, [pushAction]);
+
+      // ── Place object ──────────────────────────────────────────────────────────
+      const placeObject = useCallback((catItem, wx, wy) => {
+        const meta = scnMetaRef.current; if (!meta) return;
+        const { boundsX, boundsZ, doc } = meta;
+        const W = canvasRef.current.width, H = canvasRef.current.height;
+        const newX = Math.max(0, Math.min(boundsX, (wx/W)*boundsX));
+        const newZ = Math.max(0, Math.min(boundsZ, (wy/H)*boundsZ));
+
+        const { kind, typeStr } = catItem;
+        // Try to clone an existing element of same typeStr or kind as template
+        const template = objectsRef.current.find(o => o.type === typeStr) ||
+                         objectsRef.current.find(o => o.kind === kind);
+        const newId  = objectsRef.current.reduce((m,o) => Math.max(m, o.id), 0) + 1;
+        const xmlId  = objectsRef.current.reduce((m,o) => Math.max(m, parseInt(o._el?.getAttribute("ID")||"0")), 0) + 1;
+        const name   = typeStr ? `${typeStr}_${xmlId}` : `${kind}_${xmlId}`;
+
+        let newEl, parent;
+        // Always target the <Objects> element explicitly — never rely on parentNode inference
+        const objectsEl = doc.querySelector("Objects");
+        parent = objectsEl ?? doc.documentElement;
+
+        if (template?._el?.parentNode) {
+          newEl = template._el.cloneNode(true);
+          // Update ProtoObject name — find the first text node and set it,
+          // but only if the type is changing (avoid duplication)
+          if (typeStr) {
+            const existingText = Array.from(newEl.childNodes).find(n => n.nodeType === 3);
+            if (existingText) {
+              existingText.nodeValue = typeStr;
+            } else {
+              newEl.insertBefore(newEl.ownerDocument.createTextNode(typeStr), newEl.firstChild);
+            }
+            // Remove any trailing text nodes after child elements to avoid duplication
+            Array.from(newEl.childNodes)
+              .filter(n => n.nodeType === 3 && n !== newEl.childNodes[0])
+              .forEach(n => newEl.removeChild(n));
+          }
+        } else {
+          newEl  = doc.createElement("Object");
+          newEl.setAttribute("IsSquad", "false");
+          newEl.setAttribute("TintValue", "1");
+          newEl.setAttribute("Group", "-1");
+          newEl.setAttribute("VisualVariationIndex", "0");
+          newEl.setAttribute("Forward", "0,0,1");
+          newEl.setAttribute("Right", "1,0,0");
+          if (typeStr) newEl.textContent = typeStr;
+        }
+        newEl.setAttribute("ID", xmlId);
+        newEl.setAttribute("EditorName", name);
+        newEl.setAttribute("Player", "0");
+        const newY = interpolateY(newX, newZ, objectsRef.current);
+        newEl.setAttribute("Position", `${newX.toFixed(4)},${newY.toFixed(4)},${newZ.toFixed(4)}`);
+        parent.appendChild(newEl);
+
+        const newObj = { id: newId, name, type: typeStr, player: "0",
+          x: newX, y: newY, z: newZ, kind,
+          raw: newEl.outerHTML.slice(0, 1200), _el: newEl };
+        setObjects(p => [...p, newObj]); setSelected(newObj);
+        pushAction({ type: "place", obj: newObj, parent }); setIsDirty(true);
+      }, [pushAction]);
+
+      // ── Place design sphere ───────────────────────────────────────────────────
+      const placeSphere = useCallback((cx, cz, radius = 100) => {
+        const meta = scnMetaRef.current; if (!meta) return null;
+        const { doc } = meta;
+        const newY = interpolateY(cx, cz, objectsRef.current);
+        const allObjs = objectsRef.current;
+        const xmlId = allObjs.reduce((m,o) => Math.max(m, parseInt(o._el?.getAttribute("ID")||"0")), 0) + 1;
+        const newId = allObjs.reduce((m,o) => Math.max(m, o.id), 0) + 1;
+        const name = `DesignSphere${xmlId}`;
+
+        let spheresEl = doc.querySelector("DesignObjects > Spheres");
+        if (!spheresEl) {
+          let designObjEl = doc.querySelector("DesignObjects");
+          if (!designObjEl) { designObjEl = doc.createElement("DesignObjects"); doc.documentElement.appendChild(designObjEl); }
+          spheresEl = doc.createElement("Spheres");
+          designObjEl.appendChild(spheresEl);
+        }
+
+        const newEl = doc.createElement("Sphere");
+        newEl.setAttribute("ID", xmlId);
+        newEl.setAttribute("Name", name);
+        newEl.setAttribute("Position", `${cx.toFixed(4)},${newY.toFixed(4)},${cz.toFixed(4)}`);
+        newEl.setAttribute("Radius", String(radius));
+        newEl.setAttribute("Player", "");
+        newEl.setAttribute("EditorName", name);
+        newEl.innerHTML = `<Data><Type>Creeps</Type><Attract>0</Attract><Repel>0</Repel><ChokePoint>0</ChokePoint><Value>0</Value><Value1/><Value2/><Value3/><Value4/><Value5/><Value6/><Value7/><Value8/><Value9/><Value10/><Value11/><Value12/></Data>`;
+        spheresEl.appendChild(newEl);
+
+        const newObj = { id: newId, name, type: "Creeps", player: "",
+          x: cx, y: newY, z: cz, radius, kind: "designsphere",
+          raw: newEl.outerHTML.slice(0, 500), _el: newEl };
+        return { newObj, parent: spheresEl };
+      }, []);
+
+      // ── Place prefab (multiple objects at relative offsets) ───────────────────
+      const placePrefab = useCallback((catItem, wx, wy) => {
+        const meta = scnMetaRef.current; if (!meta) return;
+        const { boundsX, boundsZ, doc } = meta;
+        const W = canvasRef.current.width, H = canvasRef.current.height;
+        const cx = Math.max(0, Math.min(boundsX, (wx/W)*boundsX));
+        const cz = Math.max(0, Math.min(boundsZ, (wy/H)*boundsZ));
+        const objectsEl = doc.querySelector("Objects");
+        const parent = objectsEl ?? doc.documentElement;
+        const placed = [];
+
+        catItem.prefabItems.forEach(({ typeStr, kind, dx, dz }) => {
+          const newX = Math.max(0, Math.min(boundsX, cx + dx));
+          const newZ = Math.max(0, Math.min(boundsZ, cz + dz));
+          const newY = interpolateY(newX, newZ, objectsRef.current);
+          const template = objectsRef.current.find(o => o.type === typeStr) ||
+                           objectsRef.current.find(o => o.kind === kind);
+          const allObjs = [...objectsRef.current, ...placed];
+          const newId  = allObjs.reduce((m,o) => Math.max(m, o.id), 0) + 1;
+          const xmlId  = allObjs.reduce((m,o) => Math.max(m, parseInt(o._el?.getAttribute("ID")||"0")), 0) + 1;
+          const name   = `${typeStr}_${xmlId}`;
+
+          let newEl;
+          if (template?._el) {
+            newEl = template._el.cloneNode(true);
+            if (typeStr) {
+              const existingText = Array.from(newEl.childNodes).find(n => n.nodeType === 3);
+              if (existingText) existingText.nodeValue = typeStr;
+              else newEl.insertBefore(newEl.ownerDocument.createTextNode(typeStr), newEl.firstChild);
+              Array.from(newEl.childNodes)
+                .filter(n => n.nodeType === 3 && n !== newEl.childNodes[0])
+                .forEach(n => newEl.removeChild(n));
+            }
+          } else {
+            newEl = doc.createElement("Object");
+            newEl.setAttribute("IsSquad", "false");
+            newEl.setAttribute("TintValue", "1");
+            newEl.setAttribute("Group", "-1");
+            newEl.setAttribute("VisualVariationIndex", "0");
+            newEl.setAttribute("Forward", "0,0,1");
+            newEl.setAttribute("Right", "1,0,0");
+            if (typeStr) newEl.textContent = typeStr;
+          }
+          newEl.setAttribute("ID", xmlId);
+          newEl.setAttribute("EditorName", name);
+          newEl.setAttribute("Player", "0");
+          newEl.setAttribute("Position", `${newX.toFixed(4)},${newY.toFixed(4)},${newZ.toFixed(4)}`);
+          parent.appendChild(newEl);
+          const newObj = { id: newId, name, type: typeStr, player: "0",
+            x: newX, y: newY, z: newZ, kind, raw: newEl.outerHTML.slice(0,1200), _el: newEl };
+          placed.push(newObj);
+        });
+
+        setObjects(p => [...p, ...placed]);
+        setSelected(placed[0]);
+        placed.forEach(obj => pushAction({ type: "place", obj, parent }));
+
+        // Place a Design Sphere covering all prefab markers
+        const sphere = placeSphere(cx, cz, 100);
+        if (sphere) {
+          setObjects(p => [...p, sphere.newObj]);
+          pushAction({ type: "place", obj: sphere.newObj, parent: sphere.parent });
+        }
+        setIsDirty(true);
+      }, [pushAction, placeSphere]);
+
+      const canvasToWorldStable = (clientX, clientY, p, z) => {
+        const canvas = canvasRef.current; if (!canvas) return { wx:0, wy:0 };
+        const rect = canvas.getBoundingClientRect();
+        return { wx: ((clientX - rect.left)*(canvas.width/rect.width)  - p.x) / z,
+                 wy: ((clientY - rect.top) *(canvas.height/rect.height) - p.y) / z };
+      };
+
+      const startGalleryDrag = useCallback((catItem) => (e) => {
+        e.preventDefault();
+        galleryDragRef.current = catItem;
+        setGhostItem(catItem);
+        setGhostPos({ x: e.clientX, y: e.clientY });
+        const onMove = (ev) => setGhostPos({ x: ev.clientX, y: ev.clientY });
+        const onUp   = (ev) => {
+          window.removeEventListener("mousemove", onMove);
+          window.removeEventListener("mouseup", onUp);
+          const container = containerRef.current;
+          if (container) {
+            const r = container.getBoundingClientRect();
+            if (ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom) {
+              const { wx, wy } = canvasToWorldStable(ev.clientX, ev.clientY, panRef.current, zoomRef.current);
+              if (galleryDragRef.current.isPrefab) placePrefab(galleryDragRef.current, wx, wy);
+              else if (galleryDragRef.current.isSphere) {
+                const meta = scnMetaRef.current; if (!meta) return;
+                const { boundsX, boundsZ } = meta;
+                const W = canvasRef.current.width, H = canvasRef.current.height;
+                const cx = Math.max(0, Math.min(boundsX, (wx/W)*boundsX));
+                const cz = Math.max(0, Math.min(boundsZ, (wy/H)*boundsZ));
+                const sphere = placeSphere(cx, cz, galleryDragRef.current.radius || 65);
+                if (sphere) {
+                  setObjects(p => [...p, sphere.newObj]);
+                  setSelected(sphere.newObj);
+                  pushAction({ type: "place", obj: sphere.newObj, parent: sphere.parent });
+                  setIsDirty(true);
+                }
+              }
+              else placeObject(galleryDragRef.current, wx, wy);
+            }
+          }
+          galleryDragRef.current = null; setGhostPos(null); setGhostItem(null);
+        };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+      }, [placeObject, placePrefab, placeSphere]);
+
+      // ── Keyboard ──────────────────────────────────────────────────────────────
+      useEffect(() => {
+        const h = (e) => {
+          if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+          const mod = e.metaKey || e.ctrlKey;
+          if (mod && e.key==="z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
+          if (mod && (e.key==="Z" || (e.key==="z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
+          if (mod && e.key==="c") { e.preventDefault(); copySelected(); return; }
+          if (mod && e.key==="v") { e.preventDefault(); pasteClipboard(); return; }
+          if ((e.key==="Delete"||e.key==="Backspace") && !mod) { deleteSelected(); return; }
+        };
+        window.addEventListener("keydown", h);
+        return () => window.removeEventListener("keydown", h);
+      }, [undo, redo, copySelected, pasteClipboard, deleteSelected]);
+
+      // ── File loaders ──────────────────────────────────────────────────────────
+      const handleScnUpload = (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        const r = new FileReader();
+        r.onload = (ev) => {
+          try {
+            const { objects: objs, boundsX, boundsZ, doc } = parseSCN(ev.target.result);
+            setScnMeta({ boundsX, boundsZ, doc }); setObjects(objs);
+            setSelected(null); setIsDirty(false);
+            historyRef.current = []; histIdxRef.current = -1; clipRef.current = null;
+            setHistVersion(0); setError(null);
+          } catch (err) { setError("Parse error: " + err.message); }
+        };
+        r.readAsText(f);
+      };
+
+      const handleIconUpload = (kind) => (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        const r = new FileReader();
+        r.onload = (ev) => {
+          const img = new Image();
+          img.onload = () => { iconsRef.current = { ...iconsRef.current, [kind]: img };
+            setIconsData(p => ({ ...p, [kind]: ev.target.result })); setIconsTick(t=>t+1); };
+          img.src = ev.target.result;
+        };
+        r.readAsDataURL(f);
+      };
+
+      // ── Export ────────────────────────────────────────────────────────────────
+      const exportSCN = () => {
+        const meta = scnMetaRef.current; if (!meta?.doc) return;
+        objectsRef.current.forEach(obj => {
+          if (!obj._el) return;
+          if (obj.kind === "designsphere") {
+            obj._el.setAttribute("Position", `${obj.x.toFixed(4)},${obj.y.toFixed(4)},${obj.z.toFixed(4)}`);
+          } else {
+            obj._el.setAttribute("Position", `${obj.x.toFixed(4)},${obj.y.toFixed(4)},${obj.z.toFixed(4)}`);
+            obj._el.setAttribute("Player", obj.player);
+            obj._el.setAttribute("EditorName", obj.name);
+          }
+        });
+        let xml = new XMLSerializer().serializeToString(meta.doc).replace(/ xmlns=""/g, "");
+        const url = URL.createObjectURL(new Blob([xml], { type: "text/xml" }));
+        const a = Object.assign(document.createElement("a"), { href: url, download: "modified_scenario.scn" });
+        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        setIsDirty(false);
+      };
+
+      // ── Computed ──────────────────────────────────────────────────────────────
+      const visibleObjects = objects.filter(o => activeLayers[OBJECT_TYPES[o.kind]?.layer ?? "art"]);
+
+      // ── Canvas draw ───────────────────────────────────────────────────────────
+      useEffect(() => {
+        const canvas = canvasRef.current; if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const W = canvas.width, H = canvas.height;
+        ctx.clearRect(0,0,W,H); ctx.save();
+        ctx.translate(pan.x, pan.y); ctx.scale(zoom, zoom);
+
+        // ── Grid ──
+        ctx.strokeStyle = "rgba(255,255,255,0.04)"; ctx.lineWidth = 1/zoom;
+        for (let i=0; i<=8; i++) {
+          ctx.beginPath(); ctx.moveTo((i/8)*W,0); ctx.lineTo((i/8)*W,H); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(0,(i/8)*H); ctx.lineTo(W,(i/8)*H); ctx.stroke();
+        }
+
+        if (scnMeta) {
+          const { boundsX, boundsZ } = scnMeta;
+
+          // Draw design spheres first (behind everything)
+          visibleObjects.filter(o => o.kind === "designsphere").forEach(obj => {
+            const cx = (obj.x/boundsX)*W, cy = (obj.z/boundsZ)*H;
+            const isSel = selected?.id === obj.id;
+            const pr = (obj.radius || 65) / boundsX * W;
+            ctx.save();
+            ctx.beginPath(); ctx.arc(cx, cy, pr, 0, Math.PI*2);
+            ctx.fillStyle = "rgba(255,255,255,0.03)"; ctx.fill();
+            ctx.setLineDash([6/zoom, 4/zoom]);
+            ctx.strokeStyle = isSel ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.18)";
+            ctx.lineWidth = (isSel ? 2 : 1) / zoom;
+            ctx.stroke();
+            ctx.restore();
+            // Center dot
+            ctx.beginPath(); ctx.arc(cx, cy, 4/zoom, 0, Math.PI*2);
+            ctx.fillStyle = "rgba(255,255,255,0.4)"; ctx.fill();
+            if (isSel) {
+              ctx.fillStyle = "#ffffff";
+              ctx.font = `bold ${11/zoom}px monospace`;
+              ctx.fillText(obj.name, cx + pr + 4/zoom, cy + 4/zoom);
+            }
+          });
+
+          visibleObjects.filter(o => o.kind !== "designsphere").forEach(obj => {
+            const cx = (obj.x/boundsX)*W, cy = (obj.z/boundsZ)*H;
+            const info = OBJECT_TYPES[obj.kind] || OBJECT_TYPES.default;
+            const isSel = selected?.id === obj.id;
+            const r = (DOT_RADIUS[obj.kind] || 6) / zoom;
+            const img = iconsRef.current[obj.kind];
+
+            if (isSel) {
+              ctx.beginPath(); ctx.arc(cx,cy,r*3,0,Math.PI*2);
+              ctx.fillStyle = info.color+"22"; ctx.fill();
+              ctx.save(); ctx.setLineDash([4/zoom,3/zoom]);
+              ctx.beginPath(); ctx.arc(cx,cy,r*2,0,Math.PI*2);
+              ctx.strokeStyle = info.color+"bb"; ctx.lineWidth = 1.5/zoom; ctx.stroke();
+              ctx.restore();
+            }
+
+            if (img) {
+              const hs = (DOT_RADIUS[obj.kind]||6)*2.2/zoom;
+              ctx.globalAlpha = (isDraggingObj && isSel) ? 0.6 : 1.0;
+              ctx.drawImage(img, cx-hs, cy-hs, hs*2, hs*2);
+              ctx.globalAlpha = 1.0;
+            } else {
+              ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2);
+              ctx.fillStyle = info.color; ctx.fill();
+            }
+
+            if (isSel) {
+              ctx.beginPath(); ctx.arc(cx,cy,img?r*1.7:r,0,Math.PI*2);
+              ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2/zoom; ctx.stroke();
+              ctx.fillStyle = "#ffffff"; ctx.font = `bold ${12/zoom}px monospace`;
+              ctx.fillText(obj.name, cx+(img?r*2.2:r)+4/zoom, cy+4/zoom);
+            }
+          });
+        }
+        ctx.restore();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [objects, selected, zoom, pan, scnMeta, activeLayers, iconsTick, isDraggingObj]);
+
+      // ── Canvas helpers ────────────────────────────────────────────────────────
+      const canvasToWorld = useCallback((clientX, clientY, p, z) => {
+        const canvas = canvasRef.current; if (!canvas) return {wx:0,wy:0};
+        const rect = canvas.getBoundingClientRect();
+        return { wx: ((clientX-rect.left)*(canvas.width/rect.width)-p.x)/z,
+                 wy: ((clientY-rect.top)*(canvas.height/rect.height)-p.y)/z };
+      }, []);
+
+      const findClosest = useCallback((wx, wy, z, objs, bX, bZ, W, H) => {
+        const threshold = 22/z; let closest = null, minDist = threshold;
+        objs.forEach(obj => {
+          const d = Math.sqrt(((obj.x/bX)*W-wx)**2+((obj.z/bZ)*H-wy)**2);
+          if (d < minDist) { minDist = d; closest = obj; }
+        });
+        return closest;
+      }, []);
+
+      // ── Wheel ─────────────────────────────────────────────────────────────────
+      const handleWheel = (e) => {
+        e.preventDefault();
+        const factor = e.deltaY<0?1.12:1/1.12;
+        const canvas = canvasRef.current, rect = canvas.getBoundingClientRect();
+        const px = (e.clientX-rect.left)*(canvas.width/rect.width);
+        const py = (e.clientY-rect.top)*(canvas.height/rect.height);
+        setZoom(z => { const nz = Math.min(10,Math.max(0.3,z*factor));
+          setPan(p => ({x:px-(px-p.x)*(nz/z), y:py-(py-p.y)*(nz/z)})); return nz; });
+      };
+
+      // ── Mouse down — select-first-then-drag ───────────────────────────────────
+      const handleMouseDown = (e) => {
+        if (e.button !== 0) return;
+        didMove.current = false;
+        const p = panRef.current, z = zoomRef.current;
+        const meta = scnMetaRef.current;
+        if (meta) {
+          const { wx, wy } = canvasToWorld(e.clientX, e.clientY, p, z);
+          const vis = objectsRef.current.filter(o => activeLayersRef.current[OBJECT_TYPES[o.kind]?.layer??"art"]);
+          const hit = findClosest(wx, wy, z, vis, meta.boundsX, meta.boundsZ, canvasRef.current.width, canvasRef.current.height);
+          if (hit) {
+            if (selectedRef.current?.id === hit.id) {
+              objDrag.current = { objId: hit.id, origX: hit.x, origZ: hit.z };
+              setCursorStyle("grabbing"); setIsDraggingObj(true);
+            } else { setSelected(hit); setCursorStyle("grab"); }
+            return;
+          }
+        }
+        setSelected(null);
+        panDrag.current = { startX: e.clientX, startY: e.clientY, startPan: {...p} };
+        setCursorStyle("grabbing");
+      };
+
+      // ── Mouse move ────────────────────────────────────────────────────────────
+      const handleMouseMove = (e) => {
+        const z = zoomRef.current, p = panRef.current;
+        if (objDrag.current) {
+          didMove.current = true;
+          const { wx, wy } = canvasToWorld(e.clientX, e.clientY, p, z);
+          const meta = scnMetaRef.current; if (!meta) return;
+          const { boundsX, boundsZ } = meta;
+          const W = canvasRef.current.width, H = canvasRef.current.height;
+          const newX = Math.max(0, Math.min(boundsX, (wx/W)*boundsX));
+          const newZ = Math.max(0, Math.min(boundsZ, (wy/H)*boundsZ));
+          const id = objDrag.current.objId;
+          setObjects(p => p.map(o => o.id===id ? {...o,x:newX,z:newZ} : o));
+          setSelected(p => p?.id===id ? {...p,x:newX,z:newZ} : p);
+          setIsDirty(true); return;
+        }
+        if (panDrag.current) {
+          const dx = e.clientX-panDrag.current.startX, dy = e.clientY-panDrag.current.startY;
+          if (Math.abs(dx)>3||Math.abs(dy)>3) didMove.current = true;
+          const canvas = canvasRef.current, rect = canvas.getBoundingClientRect();
+          setPan({ x: panDrag.current.startPan.x+dx*(canvas.width/rect.width),
+                   y: panDrag.current.startPan.y+dy*(canvas.height/rect.height) });
+          return;
+        }
+        // Hover cursor
+        const meta = scnMetaRef.current;
+        if (meta) {
+          const { wx, wy } = canvasToWorld(e.clientX, e.clientY, p, z);
+          const vis = objectsRef.current.filter(o => activeLayersRef.current[OBJECT_TYPES[o.kind]?.layer??"art"]);
+          const hit = findClosest(wx, wy, z, vis, meta.boundsX, meta.boundsZ, canvasRef.current.width, canvasRef.current.height);
+          const hovering = !!hit;
+          if (hovering !== hoverWas.current) {
+            hoverWas.current = hovering;
+            setCursorStyle(!hovering?"crosshair": hit.id===selectedRef.current?.id?"grab":"pointer");
+          }
+        }
+      };
+
+      // ── Mouse up ──────────────────────────────────────────────────────────────
+      const handleMouseUp = () => {
+        if (objDrag.current) {
+          if (didMove.current) {
+            const id = objDrag.current.objId;
+            const obj = objectsRef.current.find(o => o.id===id);
+            if (obj) pushAction({ type:"move", id, fromX:objDrag.current.origX, fromZ:objDrag.current.origZ, toX:obj.x, toZ:obj.z });
+          }
+          objDrag.current = null; setIsDraggingObj(false); setCursorStyle("crosshair"); return;
+        }
+        panDrag.current = null; setCursorStyle("crosshair");
+      };
+
+      const resetView = () => { setZoom(1); setPan({x:0,y:0}); };
+
+      // ── Inspector resize ──────────────────────────────────────────────────────
+      const handleResizeMouseDown = (e) => {
+        e.preventDefault();
+        resizeDrag.current = { startY: e.clientY, startH: inspectorH };
+        const onMove = (ev) => setInspectorH(Math.max(100, Math.min(600, resizeDrag.current.startH+(resizeDrag.current.startY-ev.clientY))));
+        const onUp   = () => { resizeDrag.current=null; window.removeEventListener("mousemove",onMove); window.removeEventListener("mouseup",onUp); };
+        window.addEventListener("mousemove", onMove); window.addEventListener("mouseup", onUp);
+      };
+
+      // ── Counts ────────────────────────────────────────────────────────────────
+      const objCounts = {};
+      objects.forEach(o => { objCounts[o.kind] = (objCounts[o.kind]||0)+1; });
+      const hasClipboard = !!clipRef.current;
+
+      // ── Catalogue filtering ───────────────────────────────────────────────────
+      const catQuery = catSearch.toLowerCase().trim();
+      const filteredCatalogue = catQuery
+        ? CATALOGUE.map(sec => ({
+            ...sec,
+            items: sec.items.filter(it => it.label.toLowerCase().includes(catQuery) || (it.typeStr||"").toLowerCase().includes(catQuery))
+          })).filter(sec => sec.items.length > 0)
+        : CATALOGUE;
+
+      return (
+        <div style={{ fontFamily:"'Courier New',monospace", background:"#0a0c10", color:"#c8d8e8", height:"100vh", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+
+          {/* ── Header ── */}
+          <div style={{ background:"#0d1a2a", borderBottom:"1px solid #1e3a5f", padding:"8px 20px", display:"flex", alignItems:"center", gap:20, flexShrink:0 }}>
+            <span style={{ color:"#4A9EFF", fontSize:16, fontWeight:"bold", letterSpacing:3 }}>◈ SCENARIO EDITOR</span>
+            <span style={{ fontSize:10, color:"#4a6a8a", letterSpacing:2 }}>HALO WARS DE</span>
+            <span style={{ fontSize:9, color:"#1e3a5f", letterSpacing:1 }}>by <a href="https://github.com/BoldBoimler" target="_blank" style={{color:"#2a5a8a", textDecoration:"none"}}>BoldBoimler</a></span>
+            <div style={{ marginLeft:"auto", display:"flex", gap:10, alignItems:"center" }}>
+              <button onClick={resetView} style={{...btn,fontSize:10}}>⌖ RESET VIEW</button>
+              <label style={btn}>📄 SCN FILE<input type="file" accept=".scn,.xml" onChange={handleScnUpload} style={{display:"none"}} /></label>
+              {scnMeta && (
+                <button onClick={exportSCN} style={{...btn, borderColor:isDirty?"#44FF88":"#1e3a5f", color:isDirty?"#44FF88":"#4A9EFF", fontWeight:isDirty?"bold":"normal"}}>
+                  {isDirty?"💾 EXPORT SCN ●":"💾 EXPORT SCN"}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* ── Toolbar ── */}
+          <div style={{ background:"#080f1a", borderBottom:"1px solid #111e30", padding:"5px 16px", display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+            <button onClick={undo} disabled={!canUndo} style={tbBtn(canUndo)}>↩ UNDO <span style={{opacity:.55,fontSize:9}}>{MOD}Z</span></button>
+            <button onClick={redo} disabled={!canRedo} style={tbBtn(canRedo)}>↪ REDO <span style={{opacity:.55,fontSize:9}}>{MOD}⇧Z</span></button>
+            <div style={{width:1,height:18,background:"#1a2a3a",margin:"0 4px"}} />
+            <button onClick={copySelected}   disabled={!selected}     style={tbBtn(!!selected)}>⎘ COPY  <span style={{opacity:.55,fontSize:9}}>{MOD}C</span></button>
+            <button onClick={pasteClipboard} disabled={!hasClipboard} style={tbBtn(hasClipboard)}>⎗ PASTE <span style={{opacity:.55,fontSize:9}}>{MOD}V</span></button>
+            <button onClick={deleteSelected} disabled={!selected}     style={tbBtn(!!selected,true)}>✕ DELETE <span style={{opacity:.55,fontSize:9}}>⌫</span></button>
+            <div style={{marginLeft:"auto",fontSize:10,color:"#2a4060"}}>
+              {selected
+                ? <span style={{color:"#3a6a9a"}}>SELECTED: <span style={{color:"#7ab8ff"}}>{selected.name}</span> · click again to drag</span>
+                : <span>click to select · click selected to drag · drag from panel →</span>}
+            </div>
+          </div>
+
+          {error && <div style={{background:"#2a0a0a",color:"#ff6666",padding:"6px 20px",fontSize:12,flexShrink:0}}>{error}</div>}
+
+          <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+
+            {/* ── Left panel ── */}
+            <div style={{width:210,background:"#0d1520",borderRight:"1px solid #1e3a5f",padding:12,overflowY:"auto",flexShrink:0}}>
+              <div style={ph}>SCENE OBJECTS</div>
+              {scnMeta ? (
+                <>
+                  <div style={{fontSize:11,color:"#4a6a8a",marginBottom:10}}>{objects.length} objects</div>
+                  {Object.entries(OBJECT_TYPES).map(([kind,info]) => !objCounts[kind] ? null : (
+                    <div key={kind} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,fontSize:12}}>
+                      {iconsData[kind]
+                        ? <img src={iconsData[kind]} style={{width:12,height:12,objectFit:"contain",flexShrink:0}} />
+                        : <div style={{width:8,height:8,borderRadius:"50%",background:info.color,flexShrink:0}} />}
+                      <span style={{color:"#a0b8cc",flex:1}}>{info.label}</span>
+                      <span style={{color:info.color,fontWeight:"bold"}}>{objCounts[kind]}</span>
+                    </div>
+                  ))}
+
+                  <div style={{borderTop:"1px solid #1e3a5f",marginTop:14,paddingTop:12}}>
+                    <div style={ph}>LAYERS</div>
+                    {LAYERS.map(l => (
+                      <div key={l.id} onClick={() => setActiveLayers(p=>({...p,[l.id]:!p[l.id]}))}
+                        style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,cursor:"pointer",fontSize:12,opacity:activeLayers[l.id]?1:0.35}}>
+                        <div style={{width:12,height:12,border:`1px solid ${l.color}`,background:activeLayers[l.id]?l.color:"transparent"}} />
+                        <span>{l.label}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{borderTop:"1px solid #1e3a5f",marginTop:14,paddingTop:12}}>
+                    <div style={{...ph,cursor:"pointer",display:"flex",justifyContent:"space-between",marginBottom:0}}
+                      onClick={() => setIconsOpen(o=>!o)}>
+                      <span>OBJECT ICONS</span>
+                      <span style={{fontSize:9}}>{iconsOpen?"▲":"▼"}</span>
+                    </div>
+                    {iconsOpen && (
+                      <div style={{marginTop:10}}>
+                        <div style={{fontSize:10,color:"#2a4a6a",marginBottom:8,lineHeight:1.6}}>Upload an image per type to replace dots on the map.</div>
+                        {Object.entries(OBJECT_TYPES).filter(([k]) => objCounts[k]).map(([kind,info]) => (
+                          <div key={kind} style={{display:"flex",alignItems:"center",gap:6,marginBottom:7}}>
+                            {iconsData[kind]
+                              ? <img src={iconsData[kind]} style={{width:14,height:14,objectFit:"contain"}} />
+                              : <div style={{width:8,height:8,borderRadius:"50%",background:info.color,marginLeft:3,flexShrink:0}} />}
+                            <span style={{fontSize:10,color:"#7a9ab8",flex:1}}>{info.label}</span>
+                            <label style={{...btn,fontSize:9,padding:"2px 6px",cursor:"pointer"}}>
+                              {iconsData[kind]?"↺":"+"}
+                              <input type="file" accept="image/*" onChange={handleIconUpload(kind)} style={{display:"none"}} />
+                            </label>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{borderTop:"1px solid #1e3a5f",marginTop:14,paddingTop:12}}>
+                    <div style={ph}>VIEW</div>
+                    <div style={{fontSize:11,color:"#4a6a8a",lineHeight:2}}>
+                      <div>ZOOM {(zoom*100).toFixed(0)}%</div>
+                      <div>VISIBLE {visibleObjects.length}</div>
+                      {isDirty && <div style={{color:"#44FF88"}}>● UNSAVED EDITS</div>}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div style={{fontSize:11,color:"#2a4a6a",lineHeight:2}}>Load a .scn file<br/>to begin</div>
+              )}
+            </div>
+
+            {/* ── Centre ── */}
+            <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+              {/* Map canvas */}
+              <div ref={containerRef}
+                style={{flex:1,position:"relative",background:"#060810",overflow:"hidden",cursor:ghostItem?"crosshair":cursorStyle}}
+                onWheel={handleWheel} onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
+                onMouseLeave={() => {
+                  panDrag.current = null;
+                  if (objDrag.current) {
+                    const id = objDrag.current.objId;
+                    const obj = objectsRef.current.find(o=>o.id===id);
+                    if (obj && didMove.current) pushAction({type:"move",id,fromX:objDrag.current.origX,fromZ:objDrag.current.origZ,toX:obj.x,toZ:obj.z});
+                    objDrag.current = null; setIsDraggingObj(false);
+                  }
+                  setCursorStyle("crosshair");
+                }}>
+                <canvas ref={canvasRef} width={1280} height={1280}
+                  style={{position:"absolute",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none"}} />
+                {!scnMeta && (
+                  <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,color:"#2a4a6a",pointerEvents:"none"}}>
+                    <div style={{fontSize:64,opacity:0.3}}>◈</div>
+                    <div style={{fontSize:12,letterSpacing:4}}>LOAD A SCN FILE TO BEGIN</div>
+                  </div>
+                )}
+                {ghostItem && (
+                  <div style={{position:"absolute",inset:0,border:`2px dashed ${OBJECT_TYPES[ghostItem.kind]?.color||"#888"}55`,pointerEvents:"none",zIndex:10}}>
+                    <div style={{position:"absolute",top:12,left:"50%",transform:"translateX(-50%)",
+                      fontSize:11,letterSpacing:2,color:OBJECT_TYPES[ghostItem.kind]?.color||"#888",
+                      background:"#060810cc",padding:"4px 12px"}}>
+                      DROP TO PLACE {ghostItem.label.toUpperCase()}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Inspector resize handle */}
+              <div onMouseDown={handleResizeMouseDown}
+                style={{height:6,background:"#0d1520",borderTop:"1px solid #1e3a5f",cursor:"ns-resize",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                <div style={{width:40,height:2,background:"#2a4a6a",borderRadius:2}} />
+              </div>
+
+              {/* Inspector */}
+              <div style={{height:inspectorH,background:"#0d1520",padding:"10px 16px",overflowY:"auto",flexShrink:0}}>
+                <div style={{...ph,display:"flex",alignItems:"center",gap:8}}>
+                  <span>INSPECTOR</span>
+                  {isDraggingObj && <span style={{fontSize:9,color:"#44FF88",border:"1px solid #44FF88",padding:"1px 5px"}}>↔ DRAGGING</span>}
+                </div>
+                {selected && draft ? (
+                  <div style={{fontSize:11}}>
+                    {/* Name */}
+                    <div style={{display:"flex",alignItems:"center",gap:0,marginBottom:4}}>
+                      <span style={{color:"#4a6a8a",width:56,flexShrink:0}}>NAME</span>
+                      <input value={draft.name} style={fieldInput}
+                        onChange={e=>setDraft(d=>({...d,name:e.target.value}))}
+                        onBlur={e=>commitDraftField("name",e.target.value)}
+                        onKeyDown={e=>e.key==="Enter"&&e.target.blur()} />
+                    </div>
+                    {/* Kind / Type (read-only) */}
+                    <div style={{display:"flex",gap:16,marginBottom:4}}>
+                      <div><span style={{color:"#4a6a8a",fontSize:10}}>KIND </span><span style={{color:OBJECT_TYPES[selected.kind]?.color}}>{selected.kind}</span></div>
+                      <div><span style={{color:"#4a6a8a",fontSize:10}}>TYPE </span><span style={{color:"#7a9ab8",fontSize:10}}>{selected.type||"—"}</span></div>
+                    </div>
+                    {/* Player */}
+                    <div style={{display:"flex",alignItems:"center",gap:0,marginBottom:4}}>
+                      <span style={{color:"#4a6a8a",width:56,flexShrink:0}}>PLAYER</span>
+                      <select value={draft.player} style={{...fieldInput,cursor:"pointer"}}
+                        onChange={e=>{setDraft(d=>({...d,player:e.target.value}));commitDraftField("player",e.target.value);}}>
+                        <option value="0">0 — Neutral / World</option>
+                        {[1,2,3,4,5,6].map(n=><option key={n} value={String(n)}>Player {n}</option>)}
+                      </select>
+                    </div>
+                    {/* Position */}
+                    <div style={{display:"flex",gap:6,marginBottom:4}}>
+                      {[["X","x"],["Y","y"],["Z","z"]].map(([label,field])=>(
+                        <div key={field} style={{flex:1}}>
+                          <div style={{fontSize:9,color:"#4a6a8a",marginBottom:2,letterSpacing:1}}>POS {label}</div>
+                          <input value={draft[field]}
+                            style={{...fieldInput,color:isDraggingObj&&(field==="x"||field==="z")?"#44FF88":"#c8d8e8",fontVariantNumeric:"tabular-nums"}}
+                            onChange={e=>setDraft(d=>({...d,[field]:e.target.value}))}
+                            onBlur={e=>commitDraftField(field,e.target.value)}
+                            onKeyDown={e=>e.key==="Enter"&&e.target.blur()} />
+                        </div>
+                      ))}
+                    </div>
+                    {/* ID */}
+                    <div style={{marginBottom:8}}>
+                      <span style={{color:"#4a6a8a",fontSize:10}}>ID </span>
+                      <span style={{color:"#3a5a7a"}}>{selected._el?.getAttribute("ID")||"—"}</span>
+                      <span style={{color:"#1e3a5f",marginLeft:8,fontSize:9}}>🔒 read-only</span>
+                    </div>
+                    {/* Raw XML */}
+                    <div style={{borderTop:"1px solid #1a2a3a",paddingTop:8,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div style={{color:"#3a5a7a",fontSize:10,wordBreak:"break-all",whiteSpace:"pre-wrap",flex:1,lineHeight:1.5}}>{selected.raw}</div>
+                      <button onClick={()=>navigator.clipboard?.writeText(selected.raw)}
+                        style={{...btn,fontSize:9,padding:"2px 6px",marginLeft:8,flexShrink:0}}>⎘</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{fontSize:11,color:"#2a4a6a",marginTop:8}}>Click an object to select it · editable fields appear here</div>
+                )}
+              </div>
+            </div>
+
+            {/* ── Right panel — PLACE OBJECTS catalogue ── */}
+            <div style={{width:210,background:"#0d1520",borderLeft:"1px solid #1e3a5f",display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden"}}>
+              {/* Search */}
+              <div style={{padding:"10px 12px 6px",borderBottom:"1px solid #1a2a3a",flexShrink:0}}>
+                <div style={{...ph,marginBottom:6}}>PLACE OBJECTS</div>
+                <input
+                  value={catSearch}
+                  onChange={e=>setCatSearch(e.target.value)}
+                  placeholder="search..."
+                  style={{...fieldInput,fontSize:10,padding:"3px 8px",width:"100%"}}
+                />
+              </div>
+
+              {/* Scrollable catalogue */}
+              <div style={{flex:1,overflowY:"auto",padding:"8px 0"}}>
+                {!scnMeta && (
+                  <div style={{fontSize:11,color:"#2a4a6a",padding:"0 12px",lineHeight:1.8}}>Load a .scn file,<br/>then drag types<br/>onto the map.</div>
+                )}
+                {filteredCatalogue.map(sec => {
+                  const isCollapsed = catCollapsed[sec.section] && !catQuery;
+                  return (
+                    <div key={sec.section}>
+                      {/* Section header */}
+                      <div onClick={() => !catQuery && setCatCollapsed(p=>({...p,[sec.section]:!p[sec.section]}))}
+                        style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                          padding:"5px 12px",cursor:"pointer",userSelect:"none",
+                          fontSize:9,letterSpacing:2,color:"#4a6a8a",background:"#080f1a",
+                          borderBottom:"1px solid #0d1a28"}}>
+                        <span>{sec.section}</span>
+                        {!catQuery && <span style={{fontSize:8}}>{isCollapsed?"▶":"▼"}</span>}
+                      </div>
+                      {!isCollapsed && sec.items.map(item => {
+                        const info = OBJECT_TYPES[item.kind] || OBJECT_TYPES.default;
+                        const canDrag = !!scnMeta;
+                        return (
+                          <div key={item.typeStr||item.label}
+                            className="cat-item"
+                            onMouseDown={canDrag ? startGalleryDrag(item) : undefined}
+                            style={{display:"flex",alignItems:"center",gap:8,
+                              padding:"5px 12px",cursor:canDrag?"grab":"default",
+                              userSelect:"none",background:"transparent"}}>
+                            {iconsData[item.kind]
+                              ? <img src={iconsData[item.kind]} style={{width:10,height:10,objectFit:"contain",flexShrink:0,pointerEvents:"none"}} />
+                              : <div style={{width:8,height:8,borderRadius:"50%",background:info.color,flexShrink:0,pointerEvents:"none"}} />}
+                            <div style={{flex:1,pointerEvents:"none"}}>
+                              <div style={{fontSize:11,color:"#a0b8cc"}}>{item.label}</div>
+                              {item.typeStr && <div style={{fontSize:9,color:"#2a4a6a",marginTop:1}}>{item.typeStr}</div>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Map info */}
+              {scnMeta && (
+                <div style={{borderTop:"1px solid #1e3a5f",padding:"10px 12px",flexShrink:0}}>
+                  <div style={ph}>MAP INFO</div>
+                  <div style={{fontSize:11,color:"#4a6a8a",lineHeight:2}}>
+                    <div>BOUNDS {scnMeta.boundsX} × {scnMeta.boundsZ}</div>
+                    <div>TOTAL&nbsp;&nbsp; {objects.length}</div>
+                    <div style={{color:canUndo?"#7ab8ff":"#2a4060"}}>UNDO {histIdxRef.current+1} / {historyRef.current.length}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+          </div>
+
+          {/* Ghost dot while dragging from catalogue */}
+          {ghostPos && ghostItem && (
+            <div style={{position:"fixed",left:ghostPos.x-10,top:ghostPos.y-10,
+              width:20,height:20,borderRadius:"50%",
+              background:OBJECT_TYPES[ghostItem.kind]?.color||"#888",
+              border:"2px solid white",pointerEvents:"none",zIndex:9999,
+              boxShadow:`0 0 12px ${OBJECT_TYPES[ghostItem.kind]?.color||"#888"}`,opacity:0.9}} />
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<ScenarioEditor />);
+  </script>
+</body>
+</html>
