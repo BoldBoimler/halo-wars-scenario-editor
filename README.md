@@ -143,7 +143,7 @@ Map bounds are derived from the maximum X/Z values of existing objects. The coor
 ## Community & Resources
 
 - HW:DE Discord — active modding community
-- [PhxGUI](https://github.com/CinderellaMan) — XMB↔XML conversion tool
+- PhxGUI— XMB↔XML conversion tool
 
 ---
 
@@ -152,4 +152,5 @@ Map bounds are derived from the maximum X/Z values of existing objects. The coor
 MIT © 2025 Tom van Ryswyk ([BoldBoimler](https://github.com/BoldBoimler))
 
 ## Acknowledgements
-Built in collaboration with Claude (Anthropic). The creep system reverse engineering, Design Sphere discovery, and much of the architecture was worked out through iterative development sessions with Claude.
+ 
+Built in collaboration with [Claude](https://claude.ai) (Anthropic). The creep system reverse engineering, Design Sphere discovery, and much of the architecture was worked out through iterative development sessions with Claude.
