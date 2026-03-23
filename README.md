@@ -150,3 +150,6 @@ Map bounds are derived from the maximum X/Z values of existing objects. The coor
 ## License
 
 MIT © 2025 Tom van Ryswyk ([BoldBoimler](https://github.com/BoldBoimler))
+
+## Acknowledgements
+Built in collaboration with Claude (Anthropic). The creep system reverse engineering, Design Sphere discovery, and much of the architecture was worked out through iterative development sessions with Claude.
