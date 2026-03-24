@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <!--
   Halo Wars DE — Scenario Editor
-  Version: v0.1.1
+  Version: v0.4.9
   Author:  Tom van Ryswyk (BoldBoimler) https://github.com/BoldBoimler
   License: MIT — Copyright (c) 2025 Tom van Ryswyk
   Repo:    https://github.com/BoldBoimler/halo-wars-scenario-editor
+  Built in collaboration with Claude (Anthropic) — https://claude.ai
 
-  Built with React 18 (CDN) + Babel Standalone. No build step required.
-  Open directly in any modern browser.
+  Open directly in any modern browser. No build step required.
 -->
 <html>
 <head>
@@ -28,6 +28,360 @@
 </head>
 <body>
   <div id="root"></div>
+
+  <!-- ── XTT terrain texture parser ───────────────────────────────────────────
+       Reads a Halo Wars .xtt file (ECF container) and decodes the DXT1 albedo
+       atlas into an HTMLImageElement for use as the map background.
+       Based on binary templates by kornman00 (HaloMods/HaloWarsDocs).
+  ──────────────────────────────────────────────────────────────────────────── -->
+  <script>
+    // ── ECF container (big-endian throughout) ─────────────────────────────────
+    // Header (32 bytes):
+    //   u32 signature=0xDABA7737, u32 headerSize, u32 adler32, u32 fileSize,
+    //   u16 numChunks, u16 flags, u32 id, u16 chunkExtraDataSize, u16 pad, u32 pad
+    // Each chunk entry (24 + chunkExtraDataSize bytes):
+    //   u64 id, u32 offset, u32 size, u32 adler32, u8 flags, u8 alignLog2, u16 resFlags
+    // XTT chunk IDs (as 64-bit, upper 32 bits = 0):
+    //   0x1111 = XTTHeader, 0x6666 = AtlasChunkAlbedo (DXT1)  ← target
+    // AtlasChunkAlbedo at chunk offset: i32 memSize, i32 width, i32 height,
+    //   i32 mipCount, then memSize bytes of raw D3DFMT_DXT1
+
+    const ECF_SIG = 0xDABA7737;
+
+    function parseECFChunks(view) {
+      const sig = view.getUint32(0, false);
+      if (sig !== ECF_SIG) throw new Error("Not an ECF file (bad signature 0x" + sig.toString(16).toUpperCase() + ")");
+      const headerSize      = view.getUint32(4,  false);
+      const numChunks       = view.getUint16(16, false);
+      const chunkExtraBytes = view.getUint16(24, false);
+      const chunkEntrySize  = 24 + chunkExtraBytes;
+      const chunks = new Map();
+      let pos = headerSize;
+      for (let i = 0; i < numChunks; i++) {
+        // ID is a big-endian QWORD — read as two u32s and combine as BigInt
+        const idHi  = view.getUint32(pos,     false);
+        const idLo  = view.getUint32(pos + 4, false);
+        const id    = (BigInt(idHi) << 32n) | BigInt(idLo);
+        const offset = view.getUint32(pos + 8,  false);
+        const size   = view.getUint32(pos + 12, false);
+        chunks.set(id, { offset, size });
+        pos += chunkEntrySize;
+      }
+      return chunks;
+    }
+
+    function parseXTT(arrayBuffer) {
+      const view   = new DataView(arrayBuffer);
+      const chunks = parseECFChunks(view);
+
+      const albedo = chunks.get(0x6666n);
+      if (!albedo) throw new Error("No albedo chunk (0x6666) — wrong file or version");
+      if (albedo.size < 16) throw new Error("Albedo chunk too small");
+
+      let p          = albedo.offset;
+      const memSize  = view.getInt32(p,      false); p += 4;
+      const width    = view.getInt32(p,      false); p += 4;
+      const height   = view.getInt32(p,      false); p += 4;
+      const mipCount = view.getInt32(p,      false); p += 4;
+
+      if (memSize <= 0 || width <= 0 || height <= 0)
+        throw new Error("XTT albedo invalid dimensions: " + width + "x" + height);
+
+      // First mip level only — DXT1 = ceil(w/4)*ceil(h/4)*8 bytes
+      const dxt1Bytes = Math.ceil(width / 4) * Math.ceil(height / 4) * 8;
+      if (memSize < dxt1Bytes)
+        throw new Error("memSize (" + memSize + ") < expected DXT1 size (" + dxt1Bytes + ")");
+
+      const dxt1 = new Uint8Array(arrayBuffer, p, dxt1Bytes);
+      const rgba = decodeDXT1(dxt1, width, height);
+      return { width, height, mipCount, rgba };
+    }
+
+    function xttToDataURL(arrayBuffer) {
+      const { width, height, rgba } = parseXTT(arrayBuffer);
+      // The XTT texture is stored with X as the fast axis, which comes out rotated
+      // 90° CW relative to the SCN coordinate system (where X=left-right, Z=top-bottom).
+      // Rotate 90° CCW: output is still square (W=height, H=width after rotation).
+      const src = document.createElement("canvas");
+      src.width = width; src.height = height;
+      src.getContext("2d").putImageData(new ImageData(rgba, width, height), 0, 0);
+
+      const dst = document.createElement("canvas");
+      dst.width = height; dst.height = width; // swapped for 90° rotation
+      const ctx = dst.getContext("2d");
+      ctx.translate(0, width);
+      ctx.rotate(-Math.PI / 2);
+      ctx.drawImage(src, 0, 0);
+      return dst.toDataURL("image/png");
+    }
+
+    // ── DXT1 (BC1) decoder ────────────────────────────────────────────────────
+    // Each 8-byte 4×4 block: 2× RGB565 LE endpoints + 4 rows of 2-bit palette indices.
+    // 4-color mode (c0 > c1): palette = [c0, c1, (2c0+c1)/3, (c0+2c1)/3]
+    // 3-color+transparent (c0 <= c1): palette = [c0, c1, (c0+c1)/2, transparent]
+    function decodeDXT1(src, width, height) {
+      const dst     = new Uint8ClampedArray(width * height * 4);
+      const blocksX = Math.ceil(width  / 4);
+      const blocksY = Math.ceil(height / 4);
+      let   base    = 0;
+      for (let by = 0; by < blocksY; by++) {
+        for (let bx = 0; bx < blocksX; bx++) {
+          const c0raw = src[base]     | (src[base + 1] << 8);
+          const c1raw = src[base + 2] | (src[base + 3] << 8);
+          const r0 = (c0raw >> 11) * 255 / 31 | 0;
+          const g0 = ((c0raw >> 5) & 0x3F) * 255 / 63 | 0;
+          const b0 = (c0raw & 0x1F) * 255 / 31 | 0;
+          const r1 = (c1raw >> 11) * 255 / 31 | 0;
+          const g1 = ((c1raw >> 5) & 0x3F) * 255 / 63 | 0;
+          const b1 = (c1raw & 0x1F) * 255 / 31 | 0;
+          // 4-entry palette as flat RGBA array
+          const pal = new Uint8Array(16);
+          pal[0]=r0; pal[1]=g0; pal[2]=b0; pal[3]=255;
+          pal[4]=r1; pal[5]=g1; pal[6]=b1; pal[7]=255;
+          if (c0raw > c1raw) {
+            pal[ 8] = (2*r0+r1)/3+.5|0; pal[ 9] = (2*g0+g1)/3+.5|0; pal[10] = (2*b0+b1)/3+.5|0; pal[11] = 255;
+            pal[12] = (r0+2*r1)/3+.5|0; pal[13] = (g0+2*g1)/3+.5|0; pal[14] = (b0+2*b1)/3+.5|0; pal[15] = 255;
+          } else {
+            pal[ 8] = (r0+r1)/2+.5|0; pal[ 9] = (g0+g1)/2+.5|0; pal[10] = (b0+b1)/2+.5|0; pal[11] = 255;
+            // index 3 = transparent (0,0,0,0) — already zero from new Uint8Array
+          }
+          for (let row = 0; row < 4; row++) {
+            const bits = src[base + 4 + row];
+            for (let col = 0; col < 4; col++) {
+              const px = bx*4+col, py = by*4+row;
+              if (px >= width || py >= height) continue;
+              const pi = ((bits >> (col*2)) & 3) << 2;  // palette index × 4
+              const di = (py*width + px) << 2;           // dst index × 4
+              dst[di]=pal[pi]; dst[di+1]=pal[pi+1]; dst[di+2]=pal[pi+2]; dst[di+3]=pal[pi+3];
+            }
+          }
+          base += 8;
+        }
+      }
+      return dst;
+    }
+  </script>
+
+  <!-- ── XTD heightmap parser ──────────────────────────────────────────────────
+       Reads a Halo Wars .xtd file (ECF container) and builds a height lookup
+       function: sampleHeight(worldX, worldZ) → worldY.
+       Based on binary templates by kornman00 (HaloMods/HaloWarsDocs).
+
+       Key chunks (chunk IDs are big-endian QWORDs, upper 32 bits = 0):
+         0x1111 — XTDHeader: version(i32) numXVerts(i32) numXChunks(i32)
+                             tileScale(f32) AABB{min.xyz max.xyz} (all big-endian)
+         0x8888 — AtlasChunk: PosCompMin(XMVECTOR BE) PosCompRange(XMVECTOR BE)
+                              then vertex data switches to LITTLE-endian:
+                              Positions[n] Normals[n]  (each uint32, PC 10-10-10 packed)
+
+       PC 10-10-10 position unpacking:
+         x_bits = (v >> 20) & 0x3FF
+         y_bits = (v >> 10) & 0x3FF
+         z_bits = (v >>  0) & 0x3FF
+         worldX = (x_bits / 1023) * RangeX - MinX   (MinX is typically negative)
+         worldY = (y_bits / 1023) * RangeY - MinY
+         worldZ = (z_bits / 1023) * RangeZ - MinZ
+
+       Vertex grid is numXVerts × numXVerts, row-major (Z outer, X inner).
+       Height sampled by bilinear interpolation within the grid cell.
+  ──────────────────────────────────────────────────────────────────────────── -->
+  <script>
+    // Global heightmap — set when XTD is loaded, null otherwise.
+    // sampleTerrainHeight(wx, wz) → Y in game units, or null if no XTD loaded.
+    let g_heightmap = null;
+
+    function sampleTerrainHeight(wx, wz) {
+      if (!g_heightmap) return null;
+      return g_heightmap.sample(wx, wz);
+    }
+
+    function parseXTD(arrayBuffer) {
+      const view   = new DataView(arrayBuffer);
+      const chunks = parseECFChunks(view); // reuses the ECF parser from XTT block
+
+      // ── Header (chunk 0x1111) ── big-endian ──────────────────────────────────
+      const hdrChunk = chunks.get(0x1111n);
+      if (!hdrChunk) throw new Error("XTD: no header chunk (0x1111)");
+      let p = hdrChunk.offset;
+
+      const version   = view.getInt32(p, false); p += 4;
+      if (version !== 0x000C)
+        console.warn("XTD: unexpected version 0x" + version.toString(16) + " (expected 0x000C)");
+
+      const numXVerts  = view.getInt32(p,   false); p += 4;
+      const numXChunks = view.getInt32(p,   false); p += 4;
+      const tileScale  = view.getFloat32(p, false); p += 4;
+      // AABB World — two Vector3F (min then max), big-endian floats
+      const worldMinX = view.getFloat32(p, false); p += 4;
+      const worldMinY = view.getFloat32(p, false); p += 4;
+      const worldMinZ = view.getFloat32(p, false); p += 4;
+      const worldMaxX = view.getFloat32(p, false); p += 4;
+      const worldMaxY = view.getFloat32(p, false); p += 4;
+      const worldMaxZ = view.getFloat32(p, false); p += 4;
+
+      // ── Atlas chunk (0x8888) ─────────────────────────────────────────────────
+      const atlasChunk = chunks.get(0x8888n);
+      if (!atlasChunk) throw new Error("XTD: no atlas chunk (0x8888)");
+      p = atlasChunk.offset;
+
+      // PosCompMin — XMVECTOR: 4 big-endian floats (x,y,z,w)
+      const compMinX = view.getFloat32(p, false); p += 4;
+      const compMinY = view.getFloat32(p, false); p += 4;
+      const compMinZ = view.getFloat32(p, false); p += 4;
+      p += 4; // w — unused
+
+      // PosCompRange — XMVECTOR: 4 big-endian floats (x,y,z,w)
+      const compRangeX = view.getFloat32(p, false); p += 4;
+      const compRangeY = view.getFloat32(p, false); p += 4;
+      const compRangeZ = view.getFloat32(p, false); p += 4;
+      p += 4; // w — unused
+
+      // Vertex data: little-endian uint32, PC 10-10-10 packed
+      // Total data = atlasChunk.size - 32 (two XMVECTORs)
+      // First half = positions, second half = normals — we only need positions
+      const memSize  = atlasChunk.size - 32;
+      const numVerts = (memSize / 4) / 2; // positions only
+
+      if (numVerts !== numXVerts * numXVerts)
+        console.warn("XTD: vertex count mismatch — expected " + (numXVerts*numXVerts) + " got " + numVerts);
+
+      const MASK10  = 0x3FF;
+      const RCP1023 = 1.0 / 1023.0;
+
+      // Store just the Y (height) values — that's all we need for terrain sampling
+      const heights = new Float32Array(numVerts);
+      for (let i = 0; i < numVerts; i++) {
+        const v     = view.getUint32(p, true); p += 4; // little-endian
+        const yBits = (v >> 10) & MASK10;
+        heights[i]  = (yBits * RCP1023 * compRangeY) - compMinY;
+      }
+
+      // ── Height sampler ───────────────────────────────────────────────────────
+      // Grid: numXVerts × numXVerts, row-major — index = iz * numXVerts + ix
+      // World extents from the AABB in the header
+      const spanX = worldMaxX - worldMinX;
+      const spanZ = worldMaxZ - worldMinZ;
+      const gridMax = numXVerts - 1;
+
+      function sample(wx, wz) {
+        // Normalise world position to [0, gridMax]
+        const tx = ((wx - worldMinX) / spanX) * gridMax;
+        const tz = ((wz - worldMinZ) / spanZ) * gridMax;
+        const ix = Math.max(0, Math.min(gridMax - 1, Math.floor(tx)));
+        const iz = Math.max(0, Math.min(gridMax - 1, Math.floor(tz)));
+        const fx = tx - ix;
+        const fz = tz - iz;
+        // Bilinear interpolation from 4 surrounding vertices
+        const h00 = heights[ iz      * numXVerts + ix     ];
+        const h10 = heights[ iz      * numXVerts + (ix+1) ];
+        const h01 = heights[ (iz+1)  * numXVerts + ix     ];
+        const h11 = heights[ (iz+1)  * numXVerts + (ix+1) ];
+        return h00*(1-fx)*(1-fz) + h10*fx*(1-fz) + h01*(1-fx)*fz + h11*fx*fz;
+      }
+
+      return {
+        numXVerts, tileScale,
+        worldMinX, worldMinZ, worldMaxX, worldMaxZ,
+        worldMinY, worldMaxY,
+        compMinY, compRangeY,
+        heights, sample,
+      };
+    }
+
+    // ── Hillshade compositor ─────────────────────────────────────────────────────
+    // Composites XTD-derived hillshading onto the XTT terrain texture.
+    // Called automatically when both are loaded. Returns a new data URL.
+    //
+    // Algorithm:
+    //   For each output pixel, map to the height grid, compute the surface normal
+    //   from a 3×3 Sobel gradient, dot with a sun direction, then multiply the
+    //   terrain texture color by the shading value.
+    //
+    // Sun direction: northwest at ~45° elevation (classic cartographic convention).
+    // Vertical exaggeration: tunable — higher = more dramatic shadows.
+
+    let g_xttDataURL  = null;   // raw XTT data URL, stored separately from mapImg
+
+    const HILLSHADE_SUN = (function() {
+      // Sun from NW at 45° elevation
+      const raw = { x: -1, y: 2, z: -1 };
+      const len = Math.sqrt(raw.x*raw.x + raw.y*raw.y + raw.z*raw.z);
+      return { x: raw.x/len, y: raw.y/len, z: raw.z/len };
+    })();
+
+    function buildHillshadeDataURL(xttDataURL, heightmap) {
+      // Draw XTT onto an offscreen canvas to get pixel data
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const W = img.width, H = img.height;
+          const canvas = document.createElement("canvas");
+          canvas.width = W; canvas.height = H;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0);
+          const imgData = ctx.getImageData(0, 0, W, H);
+          const px = imgData.data;
+
+          const { heights, numXVerts, tileScale } = heightmap;
+          const gridMax = numXVerts - 1;
+          // Vertical exaggeration: terrain height range vs horizontal cell size
+          // tileScale is game-units per grid step; heights are also in game units.
+          // A factor of 1 = physically accurate. Raise for more drama.
+          const vertScale = 1.0 / (tileScale || 4.0);
+
+          const sun = HILLSHADE_SUN;
+          const ambientLight = 0.25;  // minimum brightness (0-1)
+
+          for (let py = 0; py < H; py++) {
+            for (let px2 = 0; px2 < W; px2++) {
+              // Texture is rotated 90° CCW relative to height grid — swap axes
+              // pixel (px2, py) in rotated texture → grid (gz, gridMax-gx) in original
+              const gx = (py  / H) * gridMax;
+              const gz = ((W - 1 - px2) / W) * gridMax;
+
+              // Sobel gradient: sample 3×3 neighbourhood
+              const x0 = Math.max(0, Math.floor(gx) - 1);
+              const x1 = Math.min(gridMax, Math.floor(gx));
+              const x2 = Math.min(gridMax, Math.ceil(gx)  + 1);
+              const z0 = Math.max(0, Math.floor(gz) - 1);
+              const z1 = Math.min(gridMax, Math.floor(gz));
+              const z2 = Math.min(gridMax, Math.ceil(gz)  + 1);
+
+              const h00 = heights[z0*numXVerts+x0], h10 = heights[z0*numXVerts+x1], h20 = heights[z0*numXVerts+x2];
+              const h01 = heights[z1*numXVerts+x0],                                  h21 = heights[z1*numXVerts+x2];
+              const h02 = heights[z2*numXVerts+x0], h12 = heights[z2*numXVerts+x1], h22 = heights[z2*numXVerts+x2];
+
+              // Sobel X and Z derivatives (height gradient)
+              const dhdx = ((-h00 + h20) + 2*(-h01 + h21) + (-h02 + h22)) * vertScale;
+              const dhdz = ((-h00 - 2*h10 - h20) + (h02 + 2*h12 + h22))   * vertScale;
+
+              // Surface normal = normalize(-dhdx, 1, -dhdz)
+              const nx = -dhdx, ny = 1.0, nz = -dhdz;
+              const nLen = Math.sqrt(nx*nx + ny*ny + nz*nz);
+
+              // Lambertian shading + ambient
+              const shade = ambientLight + (1 - ambientLight) * Math.max(0,
+                (nx/nLen)*sun.x + (ny/nLen)*sun.y + (nz/nLen)*sun.z
+              );
+
+              // Multiply terrain texture by shade
+              const i = (py * W + px2) * 4;
+              px[i]   = px[i]   * shade | 0;
+              px[i+1] = px[i+1] * shade | 0;
+              px[i+2] = px[i+2] * shade | 0;
+              // alpha unchanged
+            }
+          }
+
+          ctx.putImageData(imgData, 0, 0);
+          resolve(canvas.toDataURL("image/png"));
+        };
+        img.onerror = reject;
+        img.src = xttDataURL;
+      });
+    }
+  </script>
+
   <script type="text/babel">
     const { useState, useRef, useEffect, useCallback } = React;
 
@@ -280,15 +634,20 @@
 
       const objects = [];
       const boundsX = 1280, boundsZ = 1280;
+      // worldOrigin: offset of world (0,0) in canvas space — updated when XTD loads
+      // Stored on scnMeta so all rendering uses the same mapping.
+      // Default: origin at (0,0), full canvas = 0→1280 world units.
 
       doc.querySelectorAll("Object").forEach((el) => {
         const pos = parsePos(el.getAttribute("Position")); if (!pos) return;
         const editorName = el.getAttribute("EditorName") || "";
-        const typeName   = directText(el);   // fix: direct text only, not nested children
+        const typeName   = directText(el);
+        const fwd        = parsePos(el.getAttribute("Forward") || "0,0,1") || { x: 0, y: 0, z: 1 };
         objects.push({
           id: objects.length, name: editorName || typeName || "Object",
           type: typeName, player: el.getAttribute("Player") || "0",
           x: pos.x, y: pos.y, z: pos.z,
+          fwdX: fwd.x, fwdZ: fwd.z,
           kind: classifyObject(editorName, typeName),
           raw: el.outerHTML.slice(0, 1200), _el: el,
         });
@@ -307,14 +666,35 @@
         });
       });
 
+      // Track how many positions we've seen per Number to assign A/B suffix for symmetric pairs
+      const slotCount = {};
+      const slotLetters = "ABCDEF";
       doc.querySelectorAll("Positions > Position").forEach((el) => {
         const pos = parsePos(el.getAttribute("Position")); if (!pos) return;
-        const player = el.getAttribute("Player") || "";
-        const number = el.getAttribute("Number") || "";
+        const player = el.getAttribute("Player") || "0";
+        const number = el.getAttribute("Number") || "0";
+        const playerInt = parseInt(player);
+
+        let name;
+        if (playerInt === -1) {
+          // Generic team slot — may have symmetric A/B variants
+          const key = `slot_${number}`;
+          slotCount[key] = (slotCount[key] || 0) + 1;
+          const letter = slotLetters[slotCount[key] - 1] || String(slotCount[key]);
+          name = `Start Slot ${number}-${letter}`;
+        } else if (playerInt > 4) {
+          // Player numbers > 4 on a 4-player map are typically camera/observer positions
+          name = `Observer/Camera #${number}`;
+        } else {
+          name = `Player ${player} Start #${number}`;
+        }
+
+        const fwd = parsePos(el.getAttribute("Forward") || "0,0,1") || { x: 0, y: 0, z: 1 };
         objects.push({
-          id: objects.length, name: `Player Start P${player} #${number}`,
+          id: objects.length, name,
           type: "playerstart", player,
           x: pos.x, y: pos.y, z: pos.z, kind: "playerstart",
+          fwdX: fwd.x, fwdZ: fwd.z,
           raw: el.outerHTML.slice(0, 500), _el: el,
         });
       });
@@ -338,6 +718,10 @@
 
     // ── Y interpolation (nearest-neighbour, inverse-distance weighted) ────────────
     function interpolateY(newX, newZ, objects, n = 6) {
+      // Prefer heightmap if XTD is loaded — exact terrain sample
+      const htY = sampleTerrainHeight(newX, newZ);
+      if (htY !== null) return htY;
+      // Fallback: inverse-distance-weighted average from nearby existing objects
       const candidates = objects
         .filter(o => typeof o.y === "number" && isFinite(o.y) && o.y !== 0)
         .map(o => ({ y: o.y, dist: Math.sqrt((o.x - newX) ** 2 + (o.z - newZ) ** 2) }))
@@ -349,6 +733,25 @@
       return candidates.reduce((s, c) => s + c.y / c.dist, 0) / totalW;
     }
 
+    // ── Object dimensions (from objects.xml ObstructionRadius) ───────────────────
+    // All values are half-extents in game units (X = width, Z = depth)
+    const OBJ_DIMS = {
+      basesocket:     { rx: 40, rz: 24 },
+      supplyhook:     { rx: 14, rz: 10 },
+      turretsocket:   { rx: 12, rz: 12 },
+      megaturret:     { rx: 16, rz: 16 },
+      bridge:         { rx: 30, rz: 60 },
+      teleporter:     { rx: 10, rz: 10 },
+      healingzone:    { rx: 10, rz: 10 },
+      sentinelstore:  { rx: 10, rz: 10 },
+      supplyspawner:  { rx: 12, rz: 12 },
+      playerstart:    { rx: 60, rz: 60 },
+      wall:           { rx: 20, rz:  5 },
+      cover:          { rx: 14, rz:  8 },
+    };
+
+    // ── Base socket child layouts (offsets from objects.xml ChildObjects) ─────────
+    // dx/dz are game-unit offsets from base center; rot is degrees
     // ── Styles ────────────────────────────────────────────────────────────────────
     const ph  = { fontSize: 10, letterSpacing: 3, color: "#4a6a8a", marginBottom: 10, borderBottom: "1px solid #1a2a3a", paddingBottom: 4 };
     const btn = { background: "transparent", border: "1px solid #1e3a5f", color: "#4A9EFF", padding: "5px 12px", fontSize: 11, cursor: "pointer", letterSpacing: 1 };
@@ -367,6 +770,16 @@
 
     // ── Main component ────────────────────────────────────────────────────────────
     function ScenarioEditor() {
+      const [mapImg,        setMapImg]        = useState(null);
+      const [mapImgStatus,  setMapImgStatus]  = useState(null);
+      const [mapOpacity,    setMapOpacity]    = useState(0.6);
+      const [terrainOffsetX, setTerrainOffsetX] = useState(4);
+      const [terrainOffsetZ, setTerrainOffsetZ] = useState(0);
+      const [terrainFlipX,   setTerrainFlipX]   = useState(true);
+      const [terrainFlipZ,   setTerrainFlipZ]   = useState(true);
+      const [xtdStatus,     setXtdStatus]     = useState(null); // null | "loading" | "ok" | string(error)
+      const [terrainBounds, setTerrainBounds] = useState(null); // {minX,minZ,maxX,maxZ} from XTD AABB
+      const [inspectorOpen, setInspectorOpen] = useState(true);
       const [scnMeta,       setScnMeta]       = useState(null);
       const [objects,       setObjects]       = useState([]);
       const [selected,      setSelected]      = useState(null);
@@ -386,9 +799,10 @@
       const [ghostPos,      setGhostPos]      = useState(null);
       const [ghostItem,     setGhostItem]     = useState(null);   // {kind, label, typeStr}
       const [catSearch,     setCatSearch]     = useState("");
-      const [catCollapsed,  setCatCollapsed]  = useState({});     // section → bool // rot: 0/90/180/270
+      const [catCollapsed,  setCatCollapsed]  = useState({});
 
       const canvasRef      = useRef(null);
+      const terrainImgRef  = useRef(null);  // HTMLImageElement for terrain background
       const containerRef   = useRef(null);
       const panDrag        = useRef(null);
       const objDrag        = useRef(null);
@@ -407,6 +821,9 @@
       const histIdxRef     = useRef(-1);
       const clipRef        = useRef(null);
 
+      useEffect(() => {
+        if (scnMeta) setScnMeta(m => m ? { ...m, flipX: terrainFlipX, flipZ: terrainFlipZ } : m);
+      }, [terrainFlipX, terrainFlipZ]);
       useEffect(() => { scnMetaRef.current      = scnMeta;      }, [scnMeta]);
       useEffect(() => { objectsRef.current      = objects;      }, [objects]);
       useEffect(() => { zoomRef.current         = zoom;         }, [zoom]);
@@ -540,10 +957,12 @@
       // ── Place object ──────────────────────────────────────────────────────────
       const placeObject = useCallback((catItem, wx, wy) => {
         const meta = scnMetaRef.current; if (!meta) return;
-        const { boundsX, boundsZ, doc } = meta;
+        const { boundsX, boundsZ, doc,
+                worldOriginX = 0, worldOriginZ = 0,
+                worldSpanX = boundsX, worldSpanZ = boundsZ } = meta;
         const W = canvasRef.current.width, H = canvasRef.current.height;
-        const newX = Math.max(0, Math.min(boundsX, (wx/W)*boundsX));
-        const newZ = Math.max(0, Math.min(boundsZ, (wy/H)*boundsZ));
+        const newX = Math.max(worldOriginX, Math.min(worldOriginX + worldSpanX, (wx/W)*worldSpanX + worldOriginX));
+        const newZ = Math.max(worldOriginZ, Math.min(worldOriginZ + worldSpanZ, (1 - wy/H)*worldSpanZ + worldOriginZ));
 
         const { kind, typeStr } = catItem;
         // Try to clone an existing element of same typeStr or kind as template
@@ -635,17 +1054,19 @@
       // ── Place prefab (multiple objects at relative offsets) ───────────────────
       const placePrefab = useCallback((catItem, wx, wy) => {
         const meta = scnMetaRef.current; if (!meta) return;
-        const { boundsX, boundsZ, doc } = meta;
+        const { boundsX, boundsZ, doc,
+                worldOriginX = 0, worldOriginZ = 0,
+                worldSpanX = boundsX, worldSpanZ = boundsZ } = meta;
         const W = canvasRef.current.width, H = canvasRef.current.height;
-        const cx = Math.max(0, Math.min(boundsX, (wx/W)*boundsX));
-        const cz = Math.max(0, Math.min(boundsZ, (wy/H)*boundsZ));
+        const cx = Math.max(worldOriginX, Math.min(worldOriginX+worldSpanX, (wx/W)*worldSpanX + worldOriginX));
+        const cz = Math.max(worldOriginZ, Math.min(worldOriginZ+worldSpanZ, (1 - wy/H)*worldSpanZ + worldOriginZ));
         const objectsEl = doc.querySelector("Objects");
         const parent = objectsEl ?? doc.documentElement;
         const placed = [];
 
         catItem.prefabItems.forEach(({ typeStr, kind, dx, dz }) => {
-          const newX = Math.max(0, Math.min(boundsX, cx + dx));
-          const newZ = Math.max(0, Math.min(boundsZ, cz + dz));
+          const newX = Math.max(worldOriginX, Math.min(worldOriginX+worldSpanX, cx + dx));
+          const newZ = Math.max(worldOriginZ, Math.min(worldOriginZ+worldSpanZ, cz + dz));
           const newY = interpolateY(newX, newZ, objectsRef.current);
           const template = objectsRef.current.find(o => o.type === typeStr) ||
                            objectsRef.current.find(o => o.kind === kind);
@@ -722,10 +1143,11 @@
               if (galleryDragRef.current.isPrefab) placePrefab(galleryDragRef.current, wx, wy);
               else if (galleryDragRef.current.isSphere) {
                 const meta = scnMetaRef.current; if (!meta) return;
-                const { boundsX, boundsZ } = meta;
+                const { boundsX, boundsZ, worldOriginX = 0, worldOriginZ = 0,
+                        worldSpanX = boundsX, worldSpanZ = boundsZ } = meta;
                 const W = canvasRef.current.width, H = canvasRef.current.height;
-                const cx = Math.max(0, Math.min(boundsX, (wx/W)*boundsX));
-                const cz = Math.max(0, Math.min(boundsZ, (wy/H)*boundsZ));
+                const cx = Math.max(worldOriginX, Math.min(worldOriginX+worldSpanX, (wx/W)*worldSpanX + worldOriginX));
+                const cz = Math.max(worldOriginZ, Math.min(worldOriginZ+worldSpanZ, (1 - wy/H)*worldSpanZ + worldOriginZ));
                 const sphere = placeSphere(cx, cz, galleryDragRef.current.radius || 65);
                 if (sphere) {
                   setObjects(p => [...p, sphere.newObj]);
@@ -765,13 +1187,89 @@
         r.onload = (ev) => {
           try {
             const { objects: objs, boundsX, boundsZ, doc } = parseSCN(ev.target.result);
-            setScnMeta({ boundsX, boundsZ, doc }); setObjects(objs);
+            const worldOriginX = 0, worldOriginZ = 0;
+            const worldSpanX = boundsX, worldSpanZ = boundsZ;
+            setScnMeta({ boundsX, boundsZ, doc,
+              worldOriginX, worldOriginZ, worldSpanX, worldSpanZ,
+              flipX: terrainFlipX, flipZ: terrainFlipZ }); setObjects(objs);
             setSelected(null); setIsDirty(false);
             historyRef.current = []; histIdxRef.current = -1; clipRef.current = null;
             setHistVersion(0); setError(null);
           } catch (err) { setError("Parse error: " + err.message); }
         };
         r.readAsText(f);
+      };
+
+      // ── XTT terrain texture loader ────────────────────────────────────────
+      // Load a data URL into the terrain image ref and trigger a redraw via mapImgStatus
+      const loadTerrainImg = (dataURL) => {
+        const img = new Image();
+        img.onload = () => { terrainImgRef.current = img; setMapImgStatus("ok"); };
+        img.src = dataURL;
+        setMapImg(dataURL); // keep for ✕ button / status checks
+      };
+
+      const handleXttUpload = (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        setMapImgStatus("loading");
+        f.arrayBuffer().then(buf => {
+          try {
+            const dataURL = xttToDataURL(buf);
+            g_xttDataURL  = dataURL;
+            if (g_heightmap) {
+              buildHillshadeDataURL(dataURL, g_heightmap)
+                .then(shaded => loadTerrainImg(shaded))
+                .catch(() => loadTerrainImg(dataURL));
+            } else {
+              loadTerrainImg(dataURL);
+            }
+          } catch(err) {
+            setMapImgStatus(err.message);
+            setError("XTT error: " + err.message);
+          }
+        });
+      };
+
+      // ── XTD heightmap loader ─────────────────────────────────────────────────
+      const handleXtdUpload = (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        setXtdStatus("loading");
+        f.arrayBuffer().then(buf => {
+          try {
+            g_heightmap = parseXTD(buf);
+            console.log("XTD bounds:", {
+              worldMinX: g_heightmap.worldMinX, worldMinZ: g_heightmap.worldMinZ,
+              worldMaxX: g_heightmap.worldMaxX, worldMaxZ: g_heightmap.worldMaxZ,
+              spanX: g_heightmap.worldMaxX - g_heightmap.worldMinX,
+              spanZ: g_heightmap.worldMaxZ - g_heightmap.worldMinZ,
+              numXVerts: g_heightmap.numXVerts, tileScale: g_heightmap.tileScale,
+            });
+            setXtdStatus("ok");
+            const tb = {
+              minX: g_heightmap.worldMinX, minZ: g_heightmap.worldMinZ,
+              maxX: g_heightmap.worldMaxX, maxZ: g_heightmap.worldMaxZ,
+            };
+            setTerrainBounds(tb);
+            // Update scnMeta so object positioning uses the same world extents as terrain
+            setScnMeta(prev => prev ? {
+              ...prev,
+              worldOriginX: tb.minX,
+              worldOriginZ: tb.minZ,
+              worldSpanX:   tb.maxX - tb.minX,
+              worldSpanZ:   tb.maxZ - tb.minZ,
+            } : prev);
+            if (g_xttDataURL) {
+              setMapImgStatus("loading");
+              buildHillshadeDataURL(g_xttDataURL, g_heightmap)
+                .then(shaded => loadTerrainImg(shaded))
+                .catch(() => setMapImgStatus("ok"));
+            }
+          } catch(err) {
+            g_heightmap = null;
+            setXtdStatus(err.message);
+            setError("XTD error: " + err.message);
+          }
+        });
       };
 
       const handleIconUpload = (kind) => (e) => {
@@ -817,6 +1315,24 @@
         ctx.clearRect(0,0,W,H); ctx.save();
         ctx.translate(pan.x, pan.y); ctx.scale(zoom, zoom);
 
+        // ── Terrain background (drawn on canvas so pan/zoom is automatic) ──
+        const terrainImg = terrainImgRef.current;
+        if (terrainImg) {
+          const offPx = (terrainOffsetX / (scnMeta?.worldSpanX || 1280)) * W;
+          const offPz = (terrainOffsetZ / (scnMeta?.worldSpanZ || 1280)) * H;
+          ctx.globalAlpha = mapOpacity;
+          ctx.save();
+          const sx = terrainFlipX ? -1 : 1;
+          const sy = terrainFlipZ ? -1 : 1;
+          const tx = terrainFlipX ? W - offPx : offPx;
+          const ty = terrainFlipZ ? H - offPz : offPz;
+          ctx.translate(tx, ty);
+          ctx.scale(sx, sy);
+          ctx.drawImage(terrainImg, 0, 0, W, H);
+          ctx.restore();
+          ctx.globalAlpha = 1.0;
+        }
+
         // ── Grid ──
         ctx.strokeStyle = "rgba(255,255,255,0.04)"; ctx.lineWidth = 1/zoom;
         for (let i=0; i<=8; i++) {
@@ -825,11 +1341,17 @@
         }
 
         if (scnMeta) {
-          const { boundsX, boundsZ } = scnMeta;
+          const { boundsX, boundsZ,
+                  worldOriginX = 0, worldOriginZ = 0,
+                  worldSpanX = boundsX, worldSpanZ = boundsZ } = scnMeta;
+          // toCanvasX/Z: convert world coords to canvas pixels
+          const toCanvasX = (wx) => ((wx - worldOriginX) / worldSpanX) * W;
+          const toCanvasZ = (wz) => (1 - (wz - worldOriginZ) / worldSpanZ) * H;
+          const worldScale = W / worldSpanX; // pixels per world unit
 
           // Draw design spheres first (behind everything)
           visibleObjects.filter(o => o.kind === "designsphere").forEach(obj => {
-            const cx = (obj.x/boundsX)*W, cy = (obj.z/boundsZ)*H;
+            const cx = toCanvasX(obj.x), cy = toCanvasZ(obj.z);
             const isSel = selected?.id === obj.id;
             const pr = (obj.radius || 65) / boundsX * W;
             ctx.save();
@@ -851,42 +1373,129 @@
           });
 
           visibleObjects.filter(o => o.kind !== "designsphere").forEach(obj => {
-            const cx = (obj.x/boundsX)*W, cy = (obj.z/boundsZ)*H;
+            const cx = toCanvasX(obj.x), cy = toCanvasZ(obj.z);
             const info = OBJECT_TYPES[obj.kind] || OBJECT_TYPES.default;
             const isSel = selected?.id === obj.id;
-            const r = (DOT_RADIUS[obj.kind] || 6) / zoom;
-            const img = iconsRef.current[obj.kind];
+            const img  = iconsRef.current[obj.kind];
+            const dims = OBJ_DIMS[obj.kind];
+            const color = info.color;
 
+            // With Z-inverted canvas, fwdZ sign stays positive.
+            // fwdX is negated normally, plus mirrored when terrain is X-flipped.
+            const fwdX = (terrainFlipX ? 1 : -1) * (obj.fwdX ?? 0);
+            const fwdZ = obj.fwdZ ?? 1;
+            const angle = Math.atan2(fwdX, fwdZ);
+
+            ctx.save();
+
+            // ── Selection halo ──
             if (isSel) {
-              ctx.beginPath(); ctx.arc(cx,cy,r*3,0,Math.PI*2);
-              ctx.fillStyle = info.color+"22"; ctx.fill();
-              ctx.save(); ctx.setLineDash([4/zoom,3/zoom]);
-              ctx.beginPath(); ctx.arc(cx,cy,r*2,0,Math.PI*2);
-              ctx.strokeStyle = info.color+"bb"; ctx.lineWidth = 1.5/zoom; ctx.stroke();
+              const hr = dims ? Math.max(dims.rx, dims.rz) * worldScale * 1.6 : (DOT_RADIUS[obj.kind]||6)*3/zoom;
+              ctx.beginPath(); ctx.arc(cx, cy, hr, 0, Math.PI*2);
+              ctx.fillStyle = color + "22"; ctx.fill();
+              ctx.save(); ctx.setLineDash([4/zoom, 3/zoom]);
+              ctx.beginPath(); ctx.arc(cx, cy, hr*0.75, 0, Math.PI*2);
+              ctx.strokeStyle = color + "bb"; ctx.lineWidth = 1.5/zoom; ctx.stroke();
               ctx.restore();
             }
 
             if (img) {
+              // ── Custom icon ──
               const hs = (DOT_RADIUS[obj.kind]||6)*2.2/zoom;
               ctx.globalAlpha = (isDraggingObj && isSel) ? 0.6 : 1.0;
               ctx.drawImage(img, cx-hs, cy-hs, hs*2, hs*2);
               ctx.globalAlpha = 1.0;
+
+            } else if (dims) {
+              // ── Oriented rectangle footprint ──
+              const rw = dims.rx * worldScale;
+              const rh = dims.rz * worldScale;
+              ctx.translate(cx, cy);
+              ctx.rotate(angle);
+              ctx.globalAlpha = (isDraggingObj && isSel) ? 0.5 : 0.85;
+              const isZone = obj.kind === "playerstart";
+              ctx.fillStyle   = color + (isZone ? "22" : "55");
+              ctx.fillRect(-rw, -rh, rw*2, rh*2);
+              ctx.strokeStyle = color + (isZone ? "cc" : "ff");
+              ctx.lineWidth   = (isZone ? 2 : 1.5) / zoom;
+              if (isZone) ctx.setLineDash([6/zoom, 4/zoom]);
+              ctx.strokeRect(-rw, -rh, rw*2, rh*2);
+              if (isZone) {
+                ctx.setLineDash([]);
+                // Centre dot
+                ctx.beginPath(); ctx.arc(0, 0, 4/zoom, 0, Math.PI*2);
+                ctx.fillStyle = color; ctx.fill();
+              }
+              ctx.globalAlpha = 1.0;
+              ctx.rotate(-angle);
+              ctx.translate(-cx, -cy);
+
+              // ── Forward tick removed — orientation shown by rect shape ──
+
             } else {
-              ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2);
-              ctx.fillStyle = info.color; ctx.fill();
+              // ── Shape by kind ──
+              ctx.translate(cx, cy);
+              ctx.globalAlpha = (isDraggingObj && isSel) ? 0.5 : 1.0;
+              const r = (DOT_RADIUS[obj.kind] || 6) / zoom;
+
+              if (obj.kind === "rebelmarker" || obj.kind === "floodmarker" || obj.kind === "forerunnermarker") {
+                // Upward triangle
+                ctx.beginPath();
+                ctx.moveTo(0, -r*1.3);
+                ctx.lineTo(r*1.1, r*0.9);
+                ctx.lineTo(-r*1.1, r*0.9);
+                ctx.closePath();
+                ctx.fillStyle = color; ctx.fill();
+              } else if (obj.kind === "creepbase") {
+                // Larger triangle, inverted
+                ctx.beginPath();
+                ctx.moveTo(0, r*1.4);
+                ctx.lineTo(r*1.2, -r);
+                ctx.lineTo(-r*1.2, -r);
+                ctx.closePath();
+                ctx.fillStyle = color; ctx.fill();
+              } else if (obj.kind === "supplycrate") {
+                // Diamond
+                ctx.beginPath();
+                ctx.moveTo(0, -r); ctx.lineTo(r, 0);
+                ctx.lineTo(0, r); ctx.lineTo(-r, 0);
+                ctx.closePath();
+                ctx.fillStyle = color; ctx.fill();
+              } else if (obj.kind === "creepconfig" || obj.kind === "creepworld") {
+                // Small square
+                ctx.fillStyle = color + "88";
+                ctx.fillRect(-r*0.8, -r*0.8, r*1.6, r*1.6);
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1/zoom;
+                ctx.strokeRect(-r*0.8, -r*0.8, r*1.6, r*1.6);
+              } else {
+                // Default circle
+                ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2);
+                ctx.fillStyle = color; ctx.fill();
+              }
+
+              ctx.globalAlpha = 1.0;
+              ctx.translate(-cx, -cy);
             }
 
+            // ── Selection outline & label ──
             if (isSel) {
-              ctx.beginPath(); ctx.arc(cx,cy,img?r*1.7:r,0,Math.PI*2);
+              const sr = dims
+                ? Math.max(dims.rx, dims.rz) * worldScale
+                : (DOT_RADIUS[obj.kind]||6)/zoom;
+              ctx.beginPath(); ctx.arc(cx, cy, img ? sr*1.2 : sr, 0, Math.PI*2);
               ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2/zoom; ctx.stroke();
-              ctx.fillStyle = "#ffffff"; ctx.font = `bold ${12/zoom}px monospace`;
-              ctx.fillText(obj.name, cx+(img?r*2.2:r)+4/zoom, cy+4/zoom);
+              ctx.fillStyle = "#ffffff";
+              ctx.font = `bold ${12/zoom}px monospace`;
+              ctx.fillText(obj.name, cx + sr + 6/zoom, cy + 4/zoom);
             }
+
+            ctx.restore();
           });
         }
         ctx.restore();
       // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [objects, selected, zoom, pan, scnMeta, activeLayers, iconsTick, isDraggingObj]);
+      }, [objects, selected, zoom, pan, scnMeta, activeLayers, iconsTick, isDraggingObj, terrainBounds, mapOpacity, mapImg, terrainOffsetX, terrainOffsetZ, terrainFlipX, terrainFlipZ]);
 
       // ── Canvas helpers ────────────────────────────────────────────────────────
       const canvasToWorld = useCallback((clientX, clientY, p, z) => {
@@ -896,13 +1505,37 @@
                  wy: ((clientY-rect.top)*(canvas.height/rect.height)-p.y)/z };
       }, []);
 
-      const findClosest = useCallback((wx, wy, z, objs, bX, bZ, W, H) => {
-        const threshold = 22/z; let closest = null, minDist = threshold;
+      const findClosest = useCallback((wx, wy, z, objs, bX, bZ, W, H, originX = 0, originZ = 0, meta = null) => {
+        const threshold = 22/z;
+        let closest = null, minDist = Infinity;
+        let sphereFallback = null, sphereDist = Infinity;
         objs.forEach(obj => {
-          const d = Math.sqrt(((obj.x/bX)*W-wx)**2+((obj.z/bZ)*H-wy)**2);
-          if (d < minDist) { minDist = d; closest = obj; }
+          const cx = ((obj.x - originX)/bX)*W, cy = (1 - (obj.z - originZ)/bZ)*H;
+          const dims = OBJ_DIMS[obj.kind];
+          if (obj.kind === "designsphere") {
+            const pr = (obj.radius || 65) / bX * W;
+            const d = Math.sqrt((cx-wx)**2+(cy-wy)**2);
+            if (d < pr && d < sphereDist) { sphereDist = d; sphereFallback = obj; }
+            return;
+          }
+          if (dims) {
+            const fx = (obj.fwdX ?? 0) * (meta?.flipX ? 1 : -1);
+            const fz = obj.fwdZ ?? 1;
+            const angle = Math.atan2(fx, fz);
+            const dx = wx - cx, dy = wy - cy;
+            const localX = dx * Math.cos(-angle) - dy * Math.sin(-angle);
+            const localY = dx * Math.sin(-angle) + dy * Math.cos(-angle);
+            const rw = dims.rx * W / bX, rh = dims.rz * W / bX;
+            if (Math.abs(localX) <= rw && Math.abs(localY) <= rh) {
+              const d = Math.sqrt(dx*dx + dy*dy);
+              if (d < minDist) { minDist = d; closest = obj; }
+            }
+          } else {
+            const d = Math.sqrt((cx-wx)**2+(cy-wy)**2);
+            if (d < threshold && d < minDist) { minDist = d; closest = obj; }
+          }
         });
-        return closest;
+        return closest ?? sphereFallback;
       }, []);
 
       // ── Wheel ─────────────────────────────────────────────────────────────────
@@ -925,7 +1558,7 @@
         if (meta) {
           const { wx, wy } = canvasToWorld(e.clientX, e.clientY, p, z);
           const vis = objectsRef.current.filter(o => activeLayersRef.current[OBJECT_TYPES[o.kind]?.layer??"art"]);
-          const hit = findClosest(wx, wy, z, vis, meta.boundsX, meta.boundsZ, canvasRef.current.width, canvasRef.current.height);
+          const hit = findClosest(wx, wy, z, vis, meta.worldSpanX ?? meta.boundsX, meta.worldSpanZ ?? meta.boundsZ, canvasRef.current.width, canvasRef.current.height, meta.worldOriginX ?? 0, meta.worldOriginZ ?? 0, meta);
           if (hit) {
             if (selectedRef.current?.id === hit.id) {
               objDrag.current = { objId: hit.id, origX: hit.x, origZ: hit.z };
@@ -946,10 +1579,11 @@
           didMove.current = true;
           const { wx, wy } = canvasToWorld(e.clientX, e.clientY, p, z);
           const meta = scnMetaRef.current; if (!meta) return;
-          const { boundsX, boundsZ } = meta;
+          const { boundsX, boundsZ, worldOriginX = 0, worldOriginZ = 0,
+                  worldSpanX = boundsX, worldSpanZ = boundsZ } = meta;
           const W = canvasRef.current.width, H = canvasRef.current.height;
-          const newX = Math.max(0, Math.min(boundsX, (wx/W)*boundsX));
-          const newZ = Math.max(0, Math.min(boundsZ, (wy/H)*boundsZ));
+          const newX = Math.max(worldOriginX, Math.min(worldOriginX+worldSpanX, (wx/W)*worldSpanX + worldOriginX));
+          const newZ = Math.max(worldOriginZ, Math.min(worldOriginZ+worldSpanZ, (1 - wy/H)*worldSpanZ + worldOriginZ));
           const id = objDrag.current.objId;
           setObjects(p => p.map(o => o.id===id ? {...o,x:newX,z:newZ} : o));
           setSelected(p => p?.id===id ? {...p,x:newX,z:newZ} : p);
@@ -968,7 +1602,7 @@
         if (meta) {
           const { wx, wy } = canvasToWorld(e.clientX, e.clientY, p, z);
           const vis = objectsRef.current.filter(o => activeLayersRef.current[OBJECT_TYPES[o.kind]?.layer??"art"]);
-          const hit = findClosest(wx, wy, z, vis, meta.boundsX, meta.boundsZ, canvasRef.current.width, canvasRef.current.height);
+          const hit = findClosest(wx, wy, z, vis, meta.worldSpanX ?? meta.boundsX, meta.worldSpanZ ?? meta.boundsZ, canvasRef.current.width, canvasRef.current.height, meta.worldOriginX ?? 0, meta.worldOriginZ ?? 0, meta);
           const hovering = !!hit;
           if (hovering !== hoverWas.current) {
             hoverWas.current = hovering;
@@ -1023,8 +1657,19 @@
             <span style={{ color:"#4A9EFF", fontSize:16, fontWeight:"bold", letterSpacing:3 }}>◈ SCENARIO EDITOR</span>
             <span style={{ fontSize:10, color:"#4a6a8a", letterSpacing:2 }}>HALO WARS DE</span>
             <span style={{ fontSize:9, color:"#1e3a5f", letterSpacing:1 }}>by <a href="https://github.com/BoldBoimler" target="_blank" style={{color:"#2a5a8a", textDecoration:"none"}}>BoldBoimler</a></span>
+            <span style={{ fontSize:9, color:"#1a3050", letterSpacing:1 }}>v0.4.9</span>
             <div style={{ marginLeft:"auto", display:"flex", gap:10, alignItems:"center" }}>
               <button onClick={resetView} style={{...btn,fontSize:10}}>⌖ RESET VIEW</button>
+              <label style={{...btn, color: mapImgStatus==="ok"?"#44FF88": mapImgStatus==="loading"?"#FFCC44": mapImgStatus??"#4A9EFF", borderColor: mapImgStatus==="ok"?"#44FF88": mapImgStatus==="loading"?"#FFCC44":"#1e3a5f"}}>
+                {mapImgStatus==="loading" ? "⏳ LOADING…" : mapImgStatus==="ok" ? "🗺 MAP ✓" : "🗺 XTT FILE"}
+                <input type="file" accept=".xtt,.XTT" onChange={handleXttUpload} style={{display:"none"}} />
+              </label>
+              {mapImg && <button onClick={()=>{setMapImg(null);setMapImgStatus(null);g_xttDataURL=null;terrainImgRef.current=null;}} style={{...btn,fontSize:10,color:"#ff7777",borderColor:"#7a2020"}}>✕ MAP</button>}
+              <label style={{...btn, color: xtdStatus==="ok"?"#44FFCC": xtdStatus==="loading"?"#FFCC44": xtdStatus??"#4A9EFF", borderColor: xtdStatus==="ok"?"#44FFCC": xtdStatus==="loading"?"#FFCC44":"#1e3a5f"}}>
+                {xtdStatus==="loading" ? "⏳ LOADING…" : xtdStatus==="ok" ? "📐 HEIGHT ✓" : "📐 XTD FILE"}
+                <input type="file" accept=".xtd,.XTD" onChange={handleXtdUpload} style={{display:"none"}} />
+              </label>
+              {xtdStatus==="ok" && <button onClick={()=>{g_heightmap=null;setXtdStatus(null);setTerrainBounds(null);}} style={{...btn,fontSize:10,color:"#ff7777",borderColor:"#7a2020"}}>✕ HEIGHT</button>}
               <label style={btn}>📄 SCN FILE<input type="file" accept=".scn,.xml" onChange={handleScnUpload} style={{display:"none"}} /></label>
               {scnMeta && (
                 <button onClick={exportSCN} style={{...btn, borderColor:isDirty?"#44FF88":"#1e3a5f", color:isDirty?"#44FF88":"#4A9EFF", fontWeight:isDirty?"bold":"normal"}}>
@@ -1042,6 +1687,35 @@
             <button onClick={copySelected}   disabled={!selected}     style={tbBtn(!!selected)}>⎘ COPY  <span style={{opacity:.55,fontSize:9}}>{MOD}C</span></button>
             <button onClick={pasteClipboard} disabled={!hasClipboard} style={tbBtn(hasClipboard)}>⎗ PASTE <span style={{opacity:.55,fontSize:9}}>{MOD}V</span></button>
             <button onClick={deleteSelected} disabled={!selected}     style={tbBtn(!!selected,true)}>✕ DELETE <span style={{opacity:.55,fontSize:9}}>⌫</span></button>
+            {mapImg && (
+              <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:16,borderLeft:"1px solid #1a2a3a",paddingLeft:12}}>
+                <span style={{fontSize:9,color:"#4a6a8a",letterSpacing:1}}>MAP</span>
+                <input type="range" min="0" max="1" step="0.05" value={mapOpacity}
+                  onChange={e => setMapOpacity(parseFloat(e.target.value))}
+                  style={{width:80, accentColor:"#4A9EFF", cursor:"pointer"}} />
+                <span style={{fontSize:9,color:"#4a6a8a",width:28}}>{(mapOpacity*100|0)}%</span>
+                <span style={{fontSize:9,color:"#4a6a8a",marginLeft:8,letterSpacing:1}}>X</span>
+                <input type="range" min="-200" max="200" step="1" value={terrainOffsetX}
+                  onChange={e => setTerrainOffsetX(parseFloat(e.target.value))}
+                  style={{width:80, accentColor:"#FF8844", cursor:"pointer"}} />
+                <span style={{fontSize:9,color:"#FF8844",width:32}}>{terrainOffsetX|0}</span>
+                <span style={{fontSize:9,color:"#4a6a8a",letterSpacing:1}}>Z</span>
+                <input type="range" min="-200" max="200" step="1" value={terrainOffsetZ}
+                  onChange={e => setTerrainOffsetZ(parseFloat(e.target.value))}
+                  style={{width:80, accentColor:"#FF8844", cursor:"pointer"}} />
+                <span style={{fontSize:9,color:"#FF8844",width:32}}>{terrainOffsetZ|0}</span>
+                <div style={{display:"flex",gap:4,marginLeft:6,borderLeft:"1px solid #1a2a3a",paddingLeft:8}}>
+                  <button onClick={()=>setTerrainFlipX(f=>!f)}
+                    style={{...tbBtn(terrainFlipX),fontSize:9,padding:"2px 7px"}}>⇔ X</button>
+                  <button onClick={()=>setTerrainFlipZ(f=>!f)}
+                    style={{...tbBtn(terrainFlipZ),fontSize:9,padding:"2px 7px"}}>⇕ Z</button>
+                </div>
+                {(terrainOffsetX !== 4 || terrainOffsetZ !== 0) && (
+                  <button onClick={() => { setTerrainOffsetX(4); setTerrainOffsetZ(0); }}
+                    style={{...tbBtn(true),fontSize:9,padding:"2px 6px"}}>↺</button>
+                )}
+              </div>
+            )}
             <div style={{marginLeft:"auto",fontSize:10,color:"#2a4060"}}>
               {selected
                 ? <span style={{color:"#3a6a9a"}}>SELECTED: <span style={{color:"#7ab8ff"}}>{selected.name}</span> · click again to drag</span>
@@ -1110,6 +1784,8 @@
                     <div style={{fontSize:11,color:"#4a6a8a",lineHeight:2}}>
                       <div>ZOOM {(zoom*100).toFixed(0)}%</div>
                       <div>VISIBLE {visibleObjects.length}</div>
+                      {xtdStatus==="ok" && mapImg && <div style={{color:"#44FFCC"}}>📐 HILLSHADE ON</div>}
+                      {xtdStatus==="ok" && !mapImg && <div style={{color:"#44FFCC"}}>📐 HEIGHT LOADED</div>}
                       {isDirty && <div style={{color:"#44FF88"}}>● UNSAVED EDITS</div>}
                     </div>
                   </div>
@@ -1120,11 +1796,12 @@
             </div>
 
             {/* ── Centre ── */}
-            <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+            <div style={{flex:1,position:"relative",overflow:"hidden"}}>
 
               {/* Map canvas */}
               <div ref={containerRef}
-                style={{flex:1,position:"relative",background:"#060810",overflow:"hidden",cursor:ghostItem?"crosshair":cursorStyle}}
+                style={{position:"absolute",inset:0,background:"#060810",overflow:"hidden",
+                  cursor:ghostItem?"crosshair":cursorStyle}}
                 onWheel={handleWheel} onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
                 onMouseLeave={() => {
@@ -1139,10 +1816,28 @@
                 }}>
                 <canvas ref={canvasRef} width={1280} height={1280}
                   style={{position:"absolute",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none"}} />
+                {/* ── Compass rose — N points upper-left (game orientation for Terminal Moraine) ── */}
+                <svg width="56" height="56" style={{position:"absolute",top:10,right:10,pointerEvents:"none",zIndex:15,opacity:0.8}}>
+                  <circle cx="28" cy="28" r="22" fill="#060810bb" stroke="#1e3a5f" strokeWidth="1"/>
+                  {/* Rotate arrows+ticks 45° CW so N points upper-left */}
+                  <g transform="rotate(-45, 28, 28)">
+                    <polygon points="28,6 24,20 28,17 32,20" fill="#FF4444"/>
+                    <polygon points="28,50 24,36 28,39 32,36" fill="#4a6a8a"/>
+                    <line x1="6"  y1="28" x2="14" y2="28" stroke="#4a6a8a" strokeWidth="1.5"/>
+                    <line x1="42" y1="28" x2="50" y2="28" stroke="#4a6a8a" strokeWidth="1.5"/>
+                  </g>
+                  <circle cx="28" cy="28" r="3" fill="#4A9EFF"/>
+                  {/* Labels stay unrotated at fixed positions */}
+                  <text x="12" y="14" textAnchor="middle" fontSize="11" fill="#FF4444" fontFamily="monospace" fontWeight="bold">N</text>
+                  <text x="44" y="46" textAnchor="middle" fontSize="7" fill="#4a6a8a" fontFamily="monospace">S</text>
+                  <text x="44" y="14" textAnchor="middle" fontSize="7" fill="#4a6a8a" fontFamily="monospace">E</text>
+                  <text x="12" y="46" textAnchor="middle" fontSize="7" fill="#4a6a8a" fontFamily="monospace">W</text>
+                </svg>
                 {!scnMeta && (
                   <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,color:"#2a4a6a",pointerEvents:"none"}}>
                     <div style={{fontSize:64,opacity:0.3}}>◈</div>
                     <div style={{fontSize:12,letterSpacing:4}}>LOAD A SCN FILE TO BEGIN</div>
+                    <div style={{fontSize:10,letterSpacing:2,opacity:0.6}}>OPTIONALLY LOAD A .XTT FOR TERRAIN BACKGROUND</div>
                   </div>
                 )}
                 {ghostItem && (
@@ -1156,19 +1851,31 @@
                 )}
               </div>
 
-              {/* Inspector resize handle */}
-              <div onMouseDown={handleResizeMouseDown}
-                style={{height:6,background:"#0d1520",borderTop:"1px solid #1e3a5f",cursor:"ns-resize",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-                <div style={{width:40,height:2,background:"#2a4a6a",borderRadius:2}} />
-              </div>
-
-              {/* Inspector */}
-              <div style={{height:inspectorH,background:"#0d1520",padding:"10px 16px",overflowY:"auto",flexShrink:0}}>
-                <div style={{...ph,display:"flex",alignItems:"center",gap:8}}>
-                  <span>INSPECTOR</span>
-                  {isDraggingObj && <span style={{fontSize:9,color:"#44FF88",border:"1px solid #44FF88",padding:"1px 5px"}}>↔ DRAGGING</span>}
+              {/* Inspector resize handle — overlays canvas bottom */}
+              {inspectorOpen && (
+                <div onMouseDown={handleResizeMouseDown}
+                  style={{position:"absolute",bottom:inspectorH,left:0,right:0,zIndex:20,
+                    height:6,background:"#0d1520",borderTop:"1px solid #1e3a5f",
+                    cursor:"ns-resize",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                  <div style={{width:40,height:2,background:"#2a4a6a",borderRadius:2}} />
                 </div>
-                {selected && draft ? (
+              )}
+
+              {/* Inspector — overlays canvas bottom */}
+              <div style={{position:"absolute",bottom:0,left:0,right:0,zIndex:20,
+                height:inspectorOpen ? inspectorH : 28,
+                background:"#0d1520",borderTop:"1px solid #1e3a5f",
+                padding: inspectorOpen ? "10px 16px" : "0",overflowY: inspectorOpen ? "auto" : "hidden"}}>
+                <div style={{...ph, marginBottom: inspectorOpen ? 10 : 0,
+                  display:"flex",alignItems:"center",gap:8,
+                  padding: inspectorOpen ? "0" : "0 16px", paddingTop: inspectorOpen ? "0" : "6px",
+                  borderBottom: inspectorOpen ? "1px solid #1a2a3a" : "none", cursor:"pointer"}}
+                  onClick={() => setInspectorOpen(o => !o)}>
+                  <span>INSPECTOR</span>
+                  {isDraggingObj && inspectorOpen && <span style={{fontSize:9,color:"#44FF88",border:"1px solid #44FF88",padding:"1px 5px"}}>↔ DRAGGING</span>}
+                  <span style={{marginLeft:"auto",fontSize:9,color:"#2a4a6a"}}>{inspectorOpen ? "▼" : "▲"}</span>
+                </div>
+                {inspectorOpen && (selected && draft ? (
                   <div style={{fontSize:11}}>
                     {/* Name */}
                     <div style={{display:"flex",alignItems:"center",gap:0,marginBottom:4}}>
@@ -1211,6 +1918,18 @@
                       <span style={{color:"#3a5a7a"}}>{selected._el?.getAttribute("ID")||"—"}</span>
                       <span style={{color:"#1e3a5f",marginLeft:8,fontSize:9}}>🔒 read-only</span>
                     </div>
+                    {xtdStatus==="ok" && (() => {
+                      const th = sampleTerrainHeight(selected.x, selected.z);
+                      return th !== null ? (
+                        <div style={{marginBottom:8,fontSize:10}}>
+                          <span style={{color:"#4a6a8a"}}>TERRAIN Y </span>
+                          <span style={{color:"#44FFCC",fontVariantNumeric:"tabular-nums"}}>{th.toFixed(3)}</span>
+                          {Math.abs(selected.y - th) > 2 && (
+                            <span style={{color:"#FFCC44",marginLeft:8}}>⚠ obj Y off by {(selected.y - th).toFixed(1)}</span>
+                          )}
+                        </div>
+                      ) : null;
+                    })()}
                     {/* Raw XML */}
                     <div style={{borderTop:"1px solid #1a2a3a",paddingTop:8,display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div style={{color:"#3a5a7a",fontSize:10,wordBreak:"break-all",whiteSpace:"pre-wrap",flex:1,lineHeight:1.5}}>{selected.raw}</div>
@@ -1220,7 +1939,7 @@
                   </div>
                 ) : (
                   <div style={{fontSize:11,color:"#2a4a6a",marginTop:8}}>Click an object to select it · editable fields appear here</div>
-                )}
+                ))}
               </div>
             </div>
 
@@ -1288,6 +2007,16 @@
                     <div>BOUNDS {scnMeta.boundsX} × {scnMeta.boundsZ}</div>
                     <div>TOTAL&nbsp;&nbsp; {objects.length}</div>
                     <div style={{color:canUndo?"#7ab8ff":"#2a4060"}}>UNDO {histIdxRef.current+1} / {historyRef.current.length}</div>
+                    {scnMeta.worldOriginX !== 0 || scnMeta.worldOriginZ !== 0 || scnMeta.worldSpanX !== scnMeta.boundsX ? (
+                      <div style={{borderTop:"1px solid #1a2a3a",marginTop:4,paddingTop:4,color:"#44FFCC",fontSize:10}}>
+                        <div>XTD ORIGIN X {scnMeta.worldOriginX?.toFixed(1)}</div>
+                        <div>XTD ORIGIN Z {scnMeta.worldOriginZ?.toFixed(1)}</div>
+                        <div>XTD SPAN X&nbsp;&nbsp; {scnMeta.worldSpanX?.toFixed(1)}</div>
+                        <div>XTD SPAN Z&nbsp;&nbsp; {scnMeta.worldSpanZ?.toFixed(1)}</div>
+                      </div>
+                    ) : xtdStatus === "ok" ? (
+                      <div style={{color:"#FFCC44",fontSize:10,marginTop:4}}>⚠ XTD origin=(0,0) span=({scnMeta.worldSpanX?.toFixed(0)},{scnMeta.worldSpanZ?.toFixed(0)})</div>
+                    ) : null}
                   </div>
                 </div>
               )}

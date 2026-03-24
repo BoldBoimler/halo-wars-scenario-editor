@@ -113,15 +113,9 @@ Map bounds are derived from the maximum X/Z values of existing objects. The coor
 
 | Version | Goal |
 |---|---|
-| v0.1.1 | ✅ Current — Y interpolation, classifier fixes, prefab camps with Design Spheres |
-| v0.2.0 | Visual pass — distinct shapes per type, forward direction ticks, influence rings |
-| v0.3.0 | XTD heightmap parsing — accurate Y snapping + rendered terrain background |
-| v0.3.x | XTT terrain texture extraction — top-down map image auto-aligned to coordinate space |
-| v0.3.x | Map registration UI (scenariodescriptions.xml generation) |
+| v0.4.x | ✅ Terrain rendering (XTT texture + hillshade), XTD heightmap + exact Y placement, coordinate system fix (Z‑inverted canvas), compass, terrain alignment controls, correct object orientation |
+| v0.5.0 | 🎯 Test on all skirmish maps, supply hook investigation, map registration UI |
 | v1.0.0 | Stable release |
-| v2.0.0 | Triggerscript / win condition editor |
-
----
 
 ## Known Limitations
 
