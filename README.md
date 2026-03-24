@@ -2,7 +2,7 @@
 
 A browser-based scenario editor for **Halo Wars: Definitive Edition**, built as a single HTML file with no build step, no npm, no dependencies to install.
 
-![Version](https://img.shields.io/badge/version-v0.1.1-blue)
+![Version](https://img.shields.io/badge/version-v0.4.9-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Scenario Editor](assets/screenshot.png)
 ---
